@@ -16,8 +16,13 @@ pub struct StoreRequest {
     pub topic_key: Option<String>,
     pub project_id: String,
     pub session_id: String,
-    pub importance: f32,
+    /// None lets the DB default ('realtime') apply. Set Some("reviewed") during
+    /// session-start review to receive a retention boost.
+    pub importance: Option<f32>,
     pub facts: Vec<String>,
+    /// None lets the DB default ('realtime') apply. Set Some("reviewed") during
+    /// session-start review to receive a retention boost.
+    pub source: Option<String>,
 }
 
 pub struct StoreResult {
@@ -46,6 +51,7 @@ pub async fn store_memory(
     let now = Utc::now();
     let now_str = now.to_rfc3339();
 
+    let importance = req.importance.unwrap_or(0.5) as f64;
     let embedding = embedder.embed(&format!("{title} {content}"))?;
     let embedding_blob = floats_to_blob(&embedding);
 
@@ -104,15 +110,16 @@ pub async fn store_memory(
             conn.execute(
                 "UPDATE memories
                  SET content = ?1, title = ?2, facts = ?3, importance = ?4,
-                     content_hash = ?5, updated_at = ?6
-                 WHERE id = ?7",
+                     content_hash = ?5, updated_at = ?6, source = COALESCE(?7, source)
+                 WHERE id = ?8",
                 params![
                     content,
                     title,
                     facts_json,
-                    req.importance as f64,
+                    importance,
                     hash,
                     now_str.clone(),
+                    req.source.clone(),
                     id.clone()
                 ],
             )
@@ -131,30 +138,37 @@ pub async fn store_memory(
         }
     }
 
-    // Insert new memory
+    // Insert new memory. source is omitted when None so the DB default ('realtime') applies.
     let id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO memories
-            (id, project_id, topic_key, type, title, content, facts, tags,
-             importance, session_id, created_at, updated_at, content_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![
-            id.clone(),
-            req.project_id,
-            req.topic_key,
-            req.memory_type,
-            title,
-            content,
-            facts_json,
-            tags_json,
-            req.importance as f64,
-            req.session_id,
-            now_str.clone(),
-            now_str,
-            hash
-        ],
-    )
-    .await?;
+    if let Some(ref source) = req.source {
+        conn.execute(
+            "INSERT INTO memories
+                (id, project_id, topic_key, type, title, content, facts, tags,
+                 importance, session_id, source, created_at, updated_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                id.clone(), req.project_id, req.topic_key, req.memory_type,
+                title, content, facts_json, tags_json,
+                importance, req.session_id, source.clone(),
+                now_str.clone(), now_str, hash
+            ],
+        )
+        .await?;
+    } else {
+        conn.execute(
+            "INSERT INTO memories
+                (id, project_id, topic_key, type, title, content, facts, tags,
+                 importance, session_id, created_at, updated_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                id.clone(), req.project_id, req.topic_key, req.memory_type,
+                title, content, facts_json, tags_json,
+                importance, req.session_id,
+                now_str.clone(), now_str, hash
+            ],
+        )
+        .await?;
+    }
 
     conn.execute(
         "INSERT INTO memory_vectors (memory_id, embedding) VALUES (?1, ?2)",

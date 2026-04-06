@@ -28,11 +28,14 @@ fn retention_score(
     importance: f64,
     days_since_access: f64,
     access_count: i64,
+    source: &str,
 ) -> f64 {
     let salience = type_weight(memory_type) * importance;
     let decay = (-0.01 * days_since_access).exp();
     let freq = 0.03 * ((access_count + 1) as f64).ln();
-    salience * decay + freq.min(0.3)
+    // Memories stored during session-start review have broader context and hindsight.
+    let review_boost = if source == "reviewed" { 0.1 } else { 0.0 };
+    (salience * decay + freq.min(0.3) + review_boost).min(1.0)
 }
 
 /// Boost applied to type weights based on query intent keywords.
@@ -164,7 +167,7 @@ pub async fn search(
     for id in &all_ids {
         let mut rows = conn
             .query(
-                "SELECT id, type, title, created_at, importance, access_count, last_accessed
+                "SELECT id, type, title, created_at, importance, access_count, last_accessed, source
                  FROM memories WHERE id = ?1",
                 params![id.clone()],
             )
@@ -178,9 +181,10 @@ pub async fn search(
             let importance: f64 = row.get(4)?;
             let access_count: i64 = row.get(5)?;
             let last_accessed: Option<String> = row.get(6).ok();
+            let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
 
             let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
-            let ret = retention_score(&memory_type, importance, days, access_count);
+            let ret = retention_score(&memory_type, importance, days, access_count, &source);
 
             let rrf_v = vector_ranks
                 .get(&id)
@@ -253,23 +257,84 @@ pub async fn get_full(conn: &libsql::Connection, id: &str) -> Result<Option<Full
     }))
 }
 
+/// BM25-only search: no embedding required. Used by inject --type prompt to avoid
+/// loading the ONNX model on every UserPromptSubmit hook invocation.
+pub async fn search_bm25(
+    conn: &libsql::Connection,
+    query: &str,
+    project_id: &str,
+    limit: usize,
+) -> Result<Vec<CompactResult>> {
+    let now = Utc::now();
+    let fts_query = build_fts_query(query);
+    let mut rows = conn
+        .query(
+            "SELECT m.id, m.type, m.title, m.created_at, m.importance,
+                    m.access_count, m.last_accessed, m.source
+             FROM memories m
+             JOIN memories_fts ON memories_fts.rowid = m.rowid
+             WHERE memories_fts MATCH ?1
+               AND m.project_id = ?2
+               AND m.status = 'active'
+             ORDER BY bm25(memories_fts)
+             LIMIT ?3",
+            params![fts_query, project_id.to_string(), limit as i64],
+        )
+        .await?;
+
+    let mut results: Vec<CompactResult> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let memory_type: String = row.get(1)?;
+        let created_at: String = row.get(3)?;
+        let importance: f64 = row.get(4)?;
+        let access_count: i64 = row.get(5)?;
+        let last_accessed: Option<String> = row.get(6).ok();
+        let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
+        let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
+        results.push(CompactResult {
+            id: row.get(0)?,
+            title: row.get(2)?,
+            created_at,
+            score: retention_score(&memory_type, importance, days, access_count, &source),
+            memory_type,
+        });
+    }
+
+    // Update access counts
+    for r in &results {
+        let _ = conn
+            .execute(
+                "UPDATE memories SET access_count = access_count + 1, last_accessed = ?1 WHERE id = ?2",
+                params![now.to_rfc3339(), r.id.clone()],
+            )
+            .await;
+    }
+
+    Ok(results)
+}
+
 pub async fn list(
     conn: &libsql::Connection,
     project_id: &str,
     filter_type: Option<&str>,
     filter_tags: &[String],
     limit: usize,
+    min_importance: f64,
 ) -> Result<Vec<CompactResult>> {
     let now = Utc::now();
 
+    // Fetch a ceiling of candidates ordered by recency; scoring and importance
+    // filtering happen in-process. The ceiling is generous so important older
+    // memories are not dropped before scoring.
+    let ceiling = (limit * 4).max(200) as i64;
     let mut rows = conn
         .query(
-            "SELECT id, type, title, created_at, importance, access_count, last_accessed
+            "SELECT id, type, title, created_at, importance, access_count, last_accessed, source
              FROM memories
-             WHERE project_id = ?1 AND status = 'active'
+             WHERE project_id = ?1 AND status = 'active' AND importance >= ?2
              ORDER BY created_at DESC
-             LIMIT ?2",
-            params![project_id.to_string(), (limit * 4) as i64],
+             LIMIT ?3",
+            params![project_id.to_string(), min_importance, ceiling],
         )
         .await?;
 
@@ -287,20 +352,20 @@ pub async fn list(
         let importance: f64 = row.get(4)?;
         let access_count: i64 = row.get(5)?;
         let last_accessed: Option<String> = row.get(6).ok();
+        let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
         let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
 
         results.push(CompactResult {
             id: row.get(0)?,
             title: row.get(2)?,
             created_at,
-            score: retention_score(&memory_type, importance, days, access_count),
+            score: retention_score(&memory_type, importance, days, access_count, &source),
             memory_type,
         });
-
-        if results.len() >= limit {
-            break;
-        }
     }
+
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit);
 
     // tag filtering is post-query for simplicity (tags stored as JSON)
     if !filter_tags.is_empty() {

@@ -3,6 +3,12 @@ use libsql::Connection;
 
 pub async fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA).await?;
+    // Fix rows written with the old default 'agent' before the 'realtime' rename.
+    conn.execute(
+        "UPDATE memories SET source = 'realtime' WHERE source = 'agent'",
+        libsql::params![],
+    )
+    .await?;
     Ok(())
 }
 
@@ -24,7 +30,7 @@ CREATE TABLE IF NOT EXISTS memories (
     status        TEXT    DEFAULT 'active',
     supersedes    TEXT,
     session_id    TEXT,
-    source        TEXT    DEFAULT 'agent',
+    source        TEXT    NOT NULL DEFAULT 'realtime',
     created_at    TEXT    NOT NULL,
     updated_at    TEXT    NOT NULL,
     content_hash  TEXT    NOT NULL

@@ -58,32 +58,54 @@ pub async fn run(project_override: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Extract a one-line hint from a string value: first non-empty, non-whitespace line,
+/// truncated to `max_len` chars.
+fn first_line(s: &str, max_len: usize) -> &str {
+    let line = s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("");
+    if line.len() > max_len { &line[..max_len] } else { line }
+}
+
 fn extract_summary(tool_name: &str, data: &serde_json::Value) -> String {
     let input = &data["tool_input"];
     match tool_name {
         "Write" => {
             let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Created {path}")
+            let hint = input.get("content").and_then(|v| v.as_str())
+                .map(|s| first_line(s, 80))
+                .filter(|s| !s.is_empty())
+                .unwrap_or("");
+            if hint.is_empty() { format!("Created {path}") }
+            else { format!("Created {path}: {hint}") }
         }
         "Edit" | "MultiEdit" => {
             let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Edited {path}")
+            let hint = input.get("new_string").and_then(|v| v.as_str())
+                .map(|s| first_line(s, 80))
+                .filter(|s| !s.is_empty())
+                .unwrap_or("");
+            if hint.is_empty() { format!("Edited {path}") }
+            else { format!("Edited {path}: {hint}") }
         }
         "Bash" => {
             let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
             let cmd_line = cmd.lines().next().unwrap_or(cmd).trim();
             let cmd_short = if cmd_line.len() > 60 { &cmd_line[..60] } else { cmd_line };
-            let output = data
-                .get("tool_response")
+            let response = data.get("tool_response");
+            let is_error = response
+                .and_then(|r| r.get("is_error"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let output = response
                 .and_then(|r| r.get("output"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let out_line = output.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("");
+            let prefix = if is_error { "[FAILED] " } else { "" };
             if out_line.is_empty() {
-                format!("Ran: {cmd_short}")
+                format!("{prefix}Ran: {cmd_short}")
             } else {
                 let out_short = if out_line.len() > 50 { &out_line[..50] } else { out_line };
-                format!("Ran: {cmd_short} -> {out_short}")
+                format!("{prefix}Ran: {cmd_short} -> {out_short}")
             }
         }
         other => other.to_string(),

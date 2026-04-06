@@ -3,9 +3,19 @@ use chrono::Utc;
 use std::env;
 use std::io::{IsTerminal, Read};
 
-use crate::{config::Config, db::Db, embed::Embedder, migrations, project_id, retrieve};
+use crate::{config::Config, db::Db, migrations, project_id, retrieve};
 
-const INSTRUCTIONS: &str = "[memso] Call store_memory for non-obvious decisions, gotchas, discoveries, preferences. Use topic_key to upsert.\n";
+const INSTRUCTIONS: &str = "[memso] Store every decision, discovery, gotcha, failure, and unexpected outcome. \
+Err on the side of storing - use importance (0.0-1.0) to signal value, not omission. \
+Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
+After understanding a subsystem through exploration, store a how-it-works memory before moving on. \
+Use topic_key to upsert existing memories. \
+Use capture_note to record your reasoning before or after making changes - \
+PostToolUse captures describe only what changed, not why.\n";
+
+const SESSION_INSTRUCTIONS: &str = "[memso] Session start: call get_memories on the IDs in Memory Context below before proceeding. \
+When storing memories from Pending Review, set source='reviewed'. \
+Use capture_note to stage tentative observations for later review.\n";
 
 pub async fn run(
     inject_type: &str,
@@ -28,15 +38,16 @@ pub async fn run(
         "session" => run_session(&conn, &pid, limit, budget).await,
         _ => {
             let query = resolve_prompt_query(query_override);
-            let mut embedder = Embedder::load()?;
-            run_prompt(&conn, &mut embedder, &query, &pid, limit, budget).await
+            run_prompt(&conn, &query, &pid, limit, budget).await
         }
     }
 }
 
+// Uses BM25-only search (no ONNX model) to stay within the 500ms hook timeout.
+// Prompt injection is best-effort context; keyword relevance is sufficient here.
+// Full hybrid search is reserved for session-start where latency tolerance is higher.
 async fn run_prompt(
     conn: &libsql::Connection,
-    embedder: &mut Embedder,
     query: &str,
     project_id: &str,
     limit: usize,
@@ -44,7 +55,7 @@ async fn run_prompt(
 ) -> Result<()> {
     let mut output = INSTRUCTIONS.to_string();
     if !query.is_empty() {
-        let results = retrieve::search(conn, embedder, query, project_id, limit).await?;
+        let results = retrieve::search_bm25(conn, query, project_id, limit).await?;
         if !results.is_empty() {
             output.push_str(&format_compact(&results));
         }
@@ -56,10 +67,11 @@ async fn run_prompt(
 async fn run_session(
     conn: &libsql::Connection,
     project_id: &str,
-    limit: usize,
+    _limit: usize,
     budget: usize,
 ) -> Result<()> {
     let mut output = INSTRUCTIONS.to_string();
+    output.push_str(SESSION_INSTRUCTIONS);
 
     // Surface pending captures for review and mark them as presented.
     let captures = query_pending_captures(conn, project_id).await?;
@@ -68,8 +80,10 @@ async fn run_session(
         output.push_str(&format_captures(&captures));
     }
 
-    // Top memories by retention score.
-    let results = retrieve::list(conn, project_id, None, &[], limit).await?;
+    // Surface all memories above the importance floor, sorted by retention score.
+    // A generous ceiling (100) ensures nothing important is silently dropped;
+    // the budget cap handles output size.
+    let results = retrieve::list(conn, project_id, None, &[], 100, 0.4).await?;
     if !results.is_empty() {
         output.push_str(&format_compact(&results));
     }
@@ -122,7 +136,7 @@ async fn mark_captures_presented(conn: &libsql::Connection, project_id: &str) ->
 
 fn format_captures(captures: &[PendingCapture]) -> String {
     let mut out = format!(
-        "--- Pending Review ({}) - call store_memory for anything worth keeping ---\n",
+        "--- Pending Review ({}) - synthesise related captures into memories with source='reviewed'; failures are gotcha type, importance >= 0.8 ---\n",
         captures.len()
     );
     for c in captures {

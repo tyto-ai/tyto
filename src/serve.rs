@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -8,6 +9,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_with::{DisplayFromStr, PickFirst, json::JsonString, serde_as};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -34,6 +36,12 @@ struct MemsoServer {
 
 // --- Tool input schemas ---
 
+// Claude Code's MCP client serializes numeric and array parameters as JSON strings
+// regardless of the declared JSON schema type (e.g. sends "5" instead of 5).
+// PickFirst<(_, DisplayFromStr)> tries native JSON deserialization first, then falls
+// back to parsing from a string, accepting both forms transparently.
+
+#[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StoreMemoryInput {
     /// Full text of the memory to store.
@@ -48,21 +56,33 @@ struct StoreMemoryInput {
     #[serde(default)]
     topic_key: Option<String>,
     /// Array of short discrete facts extracted from the content.
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<String>")]
     #[serde(default)]
     facts: Vec<String>,
     /// Array of tag strings.
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<String>")]
     #[serde(default)]
     tags: Vec<String>,
     /// Importance 0.0-1.0. Use 0.9+ for architecture decisions, 0.7+ for gotchas.
-    #[serde(default = "default_importance")]
-    importance: f32,
+    // Claude Code MCP client sends floats as strings - see comment above.
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<f32>")]
+    #[serde(default)]
+    importance: Option<f32>,
+    /// Memory source: omit for default ('realtime'). Set to 'reviewed' when storing
+    /// during session-start review to receive a small retention boost.
+    #[serde(default)]
+    source: Option<String>,
     /// Project scope. Omit to use the server's configured project_id.
     #[serde(default)]
     project_id: Option<String>,
 }
 
-fn default_importance() -> f32 { 0.5 }
-
+#[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchMemoryInput {
     /// Natural language search query.
@@ -71,11 +91,12 @@ struct SearchMemoryInput {
     #[serde(default)]
     project_id: Option<String>,
     /// Maximum results to return (default 5).
-    #[serde(default = "default_search_limit")]
-    limit: usize,
+    // Claude Code MCP client sends integers as strings - see comment above.
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<usize>")]
+    #[serde(default)]
+    limit: Option<usize>,
 }
-
-fn default_search_limit() -> usize { 5 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GetMemoryInput {
@@ -83,6 +104,17 @@ struct GetMemoryInput {
     id: String,
 }
 
+#[serde_as]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetMemoriesInput {
+    /// IDs of memories to fetch in full (batch variant of get_memory).
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<String>")]
+    ids: Vec<String>,
+}
+
+#[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ListMemoriesInput {
     /// Project scope. Omit to use the server's configured project_id.
@@ -92,20 +124,35 @@ struct ListMemoriesInput {
     #[serde(default, rename = "type")]
     memory_type: Option<String>,
     /// Filter by tags (optional).
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<String>")]
     #[serde(default)]
     tags: Vec<String>,
     /// Maximum results to return (default 20).
-    #[serde(default = "default_list_limit")]
-    limit: usize,
+    // Claude Code MCP client sends integers as strings - see comment above.
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<usize>")]
+    #[serde(default)]
+    limit: Option<usize>,
 }
-
-fn default_list_limit() -> usize { 20 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DeleteMemoryInput {
     /// ID of the memory to delete.
     id: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CaptureNoteInput {
+    /// Brief observation from exploration or tentative finding. Reviewed at next session start.
+    summary: String,
+    /// Context label for the note (e.g. "exploration", "read", "grep"). Defaults to "note".
+    #[serde(default = "default_capture_context")]
+    context: String,
+}
+
+fn default_capture_context() -> String { "note".to_string() }
 
 // --- Tool implementations ---
 
@@ -124,6 +171,7 @@ impl MemsoServer {
             session_id: self.session_id.clone(),
             importance: input.importance,
             facts: input.facts,
+            source: input.source,
         };
         let mut embedder = self.embedder.lock().await;
         store::store_memory(&self.conn, &mut embedder, &self.write_lock, req, 30)
@@ -132,11 +180,12 @@ impl MemsoServer {
             .map_err(|e| format!("store_memory failed: {e}"))
     }
 
-    #[tool(description = "Search memories using semantic + keyword search. Returns compact summaries with IDs. Use get_memory to fetch full content.")]
+    #[tool(description = "Search memories using semantic + keyword search. Returns compact summaries with IDs. Use get_memory or get_memories to fetch full content.")]
     async fn search_memory(&self, Parameters(input): Parameters<SearchMemoryInput>) -> Result<String, String> {
         let project = input.project_id.unwrap_or_else(|| self.project_id.clone());
+        let limit = input.limit.unwrap_or(5);
         let mut embedder = self.embedder.lock().await;
-        retrieve::search(&self.conn, &mut embedder, &input.query, &project, input.limit)
+        retrieve::search(&self.conn, &mut embedder, &input.query, &project, limit)
             .await
             .map(|results| if results.is_empty() { "No memories found.".to_string() } else { format_compact(&results) })
             .map_err(|e| format!("search_memory failed: {e}"))
@@ -148,31 +197,51 @@ impl MemsoServer {
             .await
             .map_err(|e| format!("get_memory failed: {e}"))
             .and_then(|opt| {
-                opt.map(|m| {
-                    let facts: Vec<String> = m.facts.as_deref()
-                        .and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
-                    let tags: Vec<String> = m.tags.as_deref()
-                        .and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
-                    let facts_str = if facts.is_empty() { "none".to_string() }
-                        else { format!("- {}", facts.join("\n- ")) };
-                    format!(
-                        "[{memory_type}] {title}\nID: {id}\nCreated: {created}\nImportance: {imp:.1}\nTags: {tags}\n\nContent:\n{content}\n\nFacts:\n{facts}",
-                        memory_type = m.memory_type, title = m.title, id = m.id,
-                        created = m.created_at, imp = m.importance,
-                        tags = tags.join(", "), content = m.content, facts = facts_str,
-                    )
-                })
-                .ok_or_else(|| format!("Memory {} not found", input.id))
+                opt.map(|m| format_full_memory(&m))
+                    .ok_or_else(|| format!("Memory {} not found", input.id))
             })
+    }
+
+    #[tool(description = "Fetch the full content of multiple memories by ID in a single call. Use when session-start context lists several IDs you need in full.")]
+    async fn get_memories(&self, Parameters(input): Parameters<GetMemoriesInput>) -> Result<String, String> {
+        let mut parts: Vec<String> = Vec::new();
+        for id in &input.ids {
+            match retrieve::get_full(&self.conn, id).await {
+                Ok(Some(m)) => parts.push(format_full_memory(&m)),
+                Ok(None) => parts.push(format!("Memory {id} not found")),
+                Err(e) => parts.push(format!("Error fetching {id}: {e}")),
+            }
+        }
+        if parts.is_empty() {
+            Ok("No IDs provided.".to_string())
+        } else {
+            Ok(parts.join("\n---\n"))
+        }
     }
 
     #[tool(description = "List memories with optional filters. Returns compact summaries.")]
     async fn list_memories(&self, Parameters(input): Parameters<ListMemoriesInput>) -> Result<String, String> {
         let project = input.project_id.unwrap_or_else(|| self.project_id.clone());
-        retrieve::list(&self.conn, &project, input.memory_type.as_deref(), &input.tags, input.limit)
+        let limit = input.limit.unwrap_or(20);
+        retrieve::list(&self.conn, &project, input.memory_type.as_deref(), &input.tags, limit, 0.0)
             .await
             .map(|results| if results.is_empty() { "No memories found.".to_string() } else { format_compact(&results) })
             .map_err(|e| format!("list_memories failed: {e}"))
+    }
+
+    #[tool(description = "Stage a lightweight note for review at next session start. Use during exploration for tentative observations not yet ready for a full memory.")]
+    async fn capture_note(&self, Parameters(input): Parameters<CaptureNoteInput>) -> Result<String, String> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO raw_captures (id, project_id, captured_at, tool_name, summary, raw_data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                libsql::params![id, self.project_id.clone(), now, input.context, input.summary.clone(), input.summary.clone()],
+            )
+            .await
+            .map(|_| format!("Staged note: {}", input.summary))
+            .map_err(|e| format!("capture_note failed: {e}"))
     }
 
     #[tool(description = "Delete a memory by ID.")]
@@ -195,8 +264,14 @@ impl ServerHandler for MemsoServer {
             .with_server_info(Implementation::new("memso", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Persistent memory across sessions. \
-                 Use store_memory to save decisions, gotchas, preferences and discoveries. \
-                 Use search_memory at session start and before significant tasks.",
+                 Store every decision, discovery, gotcha, failure, and unexpected outcome - \
+                 use importance (0.0-1.0) to signal value, not omission. \
+                 Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
+                 After understanding a subsystem through exploration, store a how-it-works memory. \
+                 Use search_memory before significant tasks and get_memory or get_memories to fetch full content by ID. \
+                 Use capture_note to record your reasoning before or after making changes - \
+                 PostToolUse captures describe only what changed, not why. \
+                 Set source='reviewed' when storing memories during session-start review.",
             )
     }
 }
@@ -241,4 +316,19 @@ fn format_compact(results: &[retrieve::CompactResult]) -> String {
     }
     out.push_str("---");
     out
+}
+
+fn format_full_memory(m: &retrieve::FullMemory) -> String {
+    let facts: Vec<String> = m.facts.as_deref()
+        .and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default();
+    let tags: Vec<String> = m.tags.as_deref()
+        .and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+    let facts_str = if facts.is_empty() { "none".to_string() }
+        else { format!("- {}", facts.join("\n- ")) };
+    format!(
+        "[{memory_type}] {title}\nID: {id}\nCreated: {created}\nImportance: {imp:.1}\nTags: {tags}\n\nContent:\n{content}\n\nFacts:\n{facts}",
+        memory_type = m.memory_type, title = m.title, id = m.id,
+        created = m.created_at, imp = m.importance,
+        tags = tags.join(", "), content = m.content, facts = facts_str,
+    )
 }

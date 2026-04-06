@@ -40,6 +40,11 @@ reqwest = { version = "0.13", features = ["json", "rustls"], default-features = 
 # JSON schema generation for MCP tool definitions
 schemars = "1"
 
+# Flexible deserialisation: Claude Code's MCP client sends numeric and array params
+# as JSON strings regardless of schema type. serde_with PickFirst + DisplayFromStr
+# accepts both native JSON types and string-encoded values transparently.
+serde_with = { version = "2", features = ["macros", "json"] }
+
 # Secret sanitization
 regex = "1"
 once_cell = "1"
