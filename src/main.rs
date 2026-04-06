@@ -19,7 +19,7 @@ enum Command {
     },
     /// Inject memory context into agent hooks (short-lived, always exits 0)
     Inject {
-        #[arg(long, default_value = "prompt", help = "Injection type: prompt | session")]
+        #[arg(long, default_value = "prompt", help = "Injection type: prompt | session | stop | compact")]
         r#type: String,
         #[arg(long, help = "Override project ID")]
         project: Option<String>,
@@ -102,7 +102,18 @@ async fn main() -> Result<()> {
             } else {
                 println!("PostToolUse hook already configured - skipped");
             }
-            if !result.mcp_added && !result.session_hook_added && !result.prompt_hook_added && !result.capture_hook_added {
+            if result.stop_hook_added {
+                println!("{prefix}Added Stop hook");
+            } else {
+                println!("Stop hook already configured - skipped");
+            }
+            if result.compact_hook_added {
+                println!("{prefix}Added PostCompact hook");
+            } else {
+                println!("PostCompact hook already configured - skipped");
+            }
+            if !result.mcp_added && !result.session_hook_added && !result.prompt_hook_added
+                && !result.capture_hook_added && !result.stop_hook_added && !result.compact_hook_added {
                 println!("Nothing to do - memso is already fully configured.");
             } else if !dry_run {
                 println!("\nDone. Restart Claude Code for changes to take effect.");

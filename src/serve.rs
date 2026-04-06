@@ -284,9 +284,12 @@ impl ServerHandler for MemsoServer {
                  Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
                  After understanding a subsystem through exploration, store a how-it-works memory. \
                  Use search_memory before significant tasks and get_memory or get_memories to fetch full content by ID. \
-                 Use capture_note to record your reasoning before or after making changes - \
+                 Use capture_note(summary) to record your reasoning before or after making changes - \
                  PostToolUse captures describe only what changed, not why. \
-                 Set source='reviewed' when storing memories during session-start review.",
+                 Set source='reviewed' when storing memories during session-start review. \
+                 Tools: store_memory(content,type,title,[topic_key,importance,tags,facts,source]) | \
+                 search_memory(query,[limit]) | get_memory(id) | get_memories(ids) | \
+                 list_memories([type,tags,limit]) | capture_note(summary,[context]) | delete_memory(id)",
             )
     }
 }

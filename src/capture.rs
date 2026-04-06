@@ -9,6 +9,14 @@ use crate::{config::Config, db::Db, migrations, project_id};
 /// Read-only tools (Read, Glob, Grep) are excluded - they carry no memory signal.
 const CAPTURE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "Bash"];
 
+const POST_CAPTURE_INSTRUCTION: &str =
+    "[memso] State-changing tool just ran. In this response, call capture_note(summary) to record \
+WHY - the capture above records what changed, not the reason. \
+capture_note is a staging log reviewed at next session; store_memory is durable and immediately searchable. \
+If this change involved a decision, discovery, or gotcha that needs to be findable now or later this session, \
+use store_memory (type='decision'/'gotcha'/'how-it-works') instead of or in addition to capture_note. \
+Skip only if this was purely mechanical with no reasoning worth preserving.";
+
 pub async fn run(project_override: Option<String>) -> Result<()> {
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
@@ -55,6 +63,7 @@ pub async fn run(project_override: Option<String>) -> Result<()> {
     )
     .await?;
 
+    println!("{POST_CAPTURE_INSTRUCTION}");
     Ok(())
 }
 

@@ -10,12 +10,18 @@ Err on the side of storing - use importance (0.0-1.0) to signal value, not omiss
 Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
 After understanding a subsystem through exploration, store a how-it-works memory before moving on. \
 Use topic_key to upsert existing memories. \
-Use capture_note to record your reasoning before or after making changes - \
-PostToolUse captures describe only what changed, not why.\n";
+Before starting work on a topic involving unknowns, call search_memory with a targeted query - \
+the automatic context above uses the raw prompt text and may miss relevant memories. \
+capture_note(summary) is a staging log reviewed at next session start - use it to record reasoning behind changes. \
+store_memory is durable and immediately searchable - use it for decisions, discoveries, and gotchas \
+that need to be findable now or later in this session. They are not interchangeable.\n\
+[memso tools] store_memory(content,type,title,[topic_key,importance,tags,facts,source]) | \
+search_memory(query,[limit]) | get_memory(id) | get_memories(ids) | \
+list_memories([type,tags,limit]) | capture_note(summary,[context]) | delete_memory(id)\n";
 
 const SESSION_INSTRUCTIONS: &str = "[memso] Session start: call get_memories on the IDs in Memory Context below before proceeding. \
 When storing memories from Pending Review, set source='reviewed'. \
-Use capture_note to stage tentative observations for later review.\n";
+Use capture_note(summary) to stage tentative observations for later review.\n";
 
 pub async fn run(
     inject_type: &str,
@@ -24,6 +30,11 @@ pub async fn run(
     limit: usize,
     budget: usize,
 ) -> Result<()> {
+    // Stop inject needs no DB - read stop_hook_active from stdin then emit instructions.
+    if inject_type == "stop" {
+        return run_stop(budget);
+    }
+
     let cwd = env::current_dir()?;
     let config = Config::load(&cwd)?;
 
@@ -35,7 +46,7 @@ pub async fn run(
         .unwrap_or_else(|| project_id::resolve(&cwd, config.memory.project_id.as_deref()));
 
     match inject_type {
-        "session" => run_session(&conn, &pid, budget).await,
+        "session" | "compact" => run_session(&conn, &pid, budget).await,
         _ => {
             let query = resolve_prompt_query(query_override);
             run_prompt(&conn, &query, &pid, limit, budget).await
@@ -62,6 +73,31 @@ async fn run_prompt(
     }
     print_within_budget(&output, budget);
     Ok(())
+}
+
+// Fires on every Claude response completion. Outputs instructions only - no DB query.
+// Guards against infinite loops: if stop_hook_active is true, a Stop hook already
+// ran this turn (Claude responded to the hook output), so we skip to avoid compounding.
+fn run_stop(budget: usize) -> Result<()> {
+    if is_stop_hook_active() {
+        return Ok(());
+    }
+    print_within_budget(INSTRUCTIONS, budget);
+    Ok(())
+}
+
+fn is_stop_hook_active() -> bool {
+    if std::io::stdin().is_terminal() {
+        return false;
+    }
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&buf)
+        .ok()
+        .and_then(|v| v.get("stop_hook_active").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
 }
 
 async fn run_session(

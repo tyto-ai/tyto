@@ -6,12 +6,16 @@ const MCP_SERVER_NAME: &str = "memso";
 const HOOK_SESSION_CMD: &str = "memso inject --type session";
 const HOOK_PROMPT_CMD: &str = "memso inject --type prompt --budget 8000";
 const HOOK_CAPTURE_CMD: &str = "memso capture";
+const HOOK_STOP_CMD: &str = "memso inject --type stop";
+const HOOK_COMPACT_CMD: &str = "memso inject --type compact";
 
 pub struct InstallResult {
     pub mcp_added: bool,
     pub session_hook_added: bool,
     pub prompt_hook_added: bool,
     pub capture_hook_added: bool,
+    pub stop_hook_added: bool,
+    pub compact_hook_added: bool,
     pub settings_path: PathBuf,
 }
 
@@ -23,8 +27,11 @@ pub fn run(dry_run: bool) -> Result<InstallResult> {
     let session_hook_added = ensure_hook(&mut root, "SessionStart", HOOK_SESSION_CMD)?;
     let prompt_hook_added = ensure_hook(&mut root, "UserPromptSubmit", HOOK_PROMPT_CMD)?;
     let capture_hook_added = ensure_hook(&mut root, "PostToolUse", HOOK_CAPTURE_CMD)?;
+    let stop_hook_added = ensure_hook(&mut root, "Stop", HOOK_STOP_CMD)?;
+    let compact_hook_added = ensure_hook(&mut root, "PostCompact", HOOK_COMPACT_CMD)?;
 
-    let changed = mcp_added || session_hook_added || prompt_hook_added || capture_hook_added;
+    let changed = mcp_added || session_hook_added || prompt_hook_added
+        || capture_hook_added || stop_hook_added || compact_hook_added;
 
     if changed && !dry_run {
         write_settings(&path, &root)?;
@@ -35,6 +42,8 @@ pub fn run(dry_run: bool) -> Result<InstallResult> {
         session_hook_added,
         prompt_hook_added,
         capture_hook_added,
+        stop_hook_added,
+        compact_hook_added,
         settings_path: path,
     })
 }

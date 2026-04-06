@@ -1,0 +1,13 @@
+{
+  "name": "memso",
+  "version": "0.1.0-1",
+  "description": "Persistent memory for AI agents - stores decisions, discoveries, and gotchas across sessions using local libSQL with vector + BM25 search.",
+  "author": {
+    "name": "Michael Alexander",
+    "url": "https://github.com/beefsack/memso"
+  },
+  "repository": "https://github.com/beefsack/memso",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "persistence", "mcp", "agent"],
+  "hooks": "hooks/hooks.json"
+}

@@ -60,3 +60,11 @@ hex = "0.4"
 
 # XDG/platform config and cache directories
 dirs = "6"
+
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

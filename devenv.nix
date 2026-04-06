@@ -6,7 +6,9 @@
   packages = with pkgs; [
     act
     cargo-outdated
+    gh
     sqld
     turso-cli
+    upx
   ];
 }

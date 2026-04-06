@@ -6,7 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type session"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_DATA}/memso inject --type session"
           }
         ]
       }
@@ -17,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type prompt --budget 8000"
+            "command": "${CLAUDE_PLUGIN_DATA}/memso inject --type prompt --budget 8000"
           }
         ]
       }
@@ -28,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso capture"
+            "command": "${CLAUDE_PLUGIN_DATA}/memso capture"
           }
         ]
       }
@@ -39,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type stop"
+            "command": "${CLAUDE_PLUGIN_DATA}/memso inject --type stop"
           }
         ]
       }
@@ -50,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type compact"
+            "command": "${CLAUDE_PLUGIN_DATA}/memso inject --type compact"
           }
         ]
       }
