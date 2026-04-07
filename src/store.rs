@@ -23,6 +23,8 @@ pub struct StoreRequest {
     /// None lets the DB default ('realtime') apply. Set Some("reviewed") during
     /// session-start review to receive a retention boost.
     pub source: Option<String>,
+    /// None leaves the pinned flag unchanged (defaults to false on insert).
+    pub pinned: Option<bool>,
 }
 
 pub struct StoreResult {
@@ -99,11 +101,13 @@ pub async fn store_memory(
             .and_then(|r| r.get::<String>(0).ok());
 
         if let Some(ref id) = existing {
-            conn.execute(
+            let pinned_val = req.pinned.map(|p| if p { 1i64 } else { 0i64 });
+        conn.execute(
                 "UPDATE memories
                  SET content = ?1, title = ?2, tags = ?3, facts = ?4, importance = ?5,
-                     content_hash = ?6, updated_at = ?7, source = COALESCE(?8, source)
-                 WHERE id = ?9",
+                     content_hash = ?6, updated_at = ?7, source = COALESCE(?8, source),
+                     pinned = COALESCE(?9, pinned)
+                 WHERE id = ?10",
                 params![
                     content,
                     title,
@@ -113,6 +117,7 @@ pub async fn store_memory(
                     hash,
                     now_str.clone(),
                     req.source.clone(),
+                    pinned_val,
                     id.clone()
                 ],
             )
@@ -131,17 +136,18 @@ pub async fn store_memory(
         }
     }
 
-    // Insert new memory. COALESCE lets the DB default ('realtime') apply when source is NULL.
+    // Insert new memory. COALESCE lets the DB default apply when source/pinned is NULL.
+    let pinned_val = req.pinned.map(|p| if p { 1i64 } else { 0i64 });
     let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO memories
             (id, project_id, topic_key, type, title, content, facts, tags,
-             importance, session_id, source, created_at, updated_at, content_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'realtime'), ?12, ?13, ?14)",
+             importance, session_id, source, pinned, created_at, updated_at, content_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'realtime'), COALESCE(?12, 0), ?13, ?14, ?15)",
         params![
             id.clone(), req.project_id, req.topic_key, req.memory_type,
             title, content, facts_json, tags_json,
-            importance, req.session_id, req.source,
+            importance, req.session_id, req.source, pinned_val,
             now_str.clone(), now_str, hash
         ],
     )

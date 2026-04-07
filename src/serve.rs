@@ -77,6 +77,10 @@ struct StoreMemoryInput {
     /// during session-start review to receive a small retention boost.
     #[serde(default)]
     source: Option<String>,
+    /// Pin this memory so it is never evicted and always surfaces at session start.
+    /// Omit to leave unpinned (default). Use pin_memory to change later.
+    #[serde(default)]
+    pinned: Option<bool>,
     /// Project scope. Omit to use the server's configured project_id.
     #[serde(default)]
     project_id: Option<String>,
@@ -138,6 +142,14 @@ struct ListMemoriesInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct PinMemoryInput {
+    /// ID of the memory to pin or unpin.
+    id: String,
+    /// true to pin (exempt from eviction, surfaced at session start); false to unpin.
+    pin: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DeleteMemoryInput {
     /// ID of the memory to delete.
     id: String,
@@ -180,6 +192,7 @@ impl MemsoServer {
             importance: input.importance,
             facts: input.facts,
             source: input.source,
+            pinned: input.pinned,
         };
         store::store_memory(&self.conn, embedding, &self.write_lock, req, 30)
             .await
@@ -259,6 +272,26 @@ impl MemsoServer {
             .map_err(|e| format!("capture_note failed: {e}"))
     }
 
+    #[tool(description = "Pin or unpin a memory. Pinned memories are never evicted and always surface at session start. Use pin=true to pin, pin=false to unpin.")]
+    async fn pin_memory(&self, Parameters(input): Parameters<PinMemoryInput>) -> Result<String, String> {
+        let pinned_val: i64 = if input.pin { 1 } else { 0 };
+        self.conn
+            .execute(
+                "UPDATE memories SET pinned = ?1 WHERE id = ?2 AND status != 'deleted'",
+                libsql::params![pinned_val, input.id.clone()],
+            )
+            .await
+            .map_err(|e| format!("pin_memory failed: {e}"))
+            .and_then(|rows| {
+                if rows > 0 {
+                    let action = if input.pin { "Pinned" } else { "Unpinned" };
+                    Ok(format!("{action} memory {}", input.id))
+                } else {
+                    Err(format!("Memory {} not found", input.id))
+                }
+            })
+    }
+
     #[tool(description = "Delete a memory by ID.")]
     async fn delete_memory(&self, Parameters(input): Parameters<DeleteMemoryInput>) -> Result<String, String> {
         self.conn
@@ -283,13 +316,18 @@ impl ServerHandler for MemsoServer {
                  use importance (0.0-1.0) to signal value, not omission. \
                  Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
                  After understanding a subsystem through exploration, store a how-it-works memory. \
+                 When you find a bug: store it as gotcha before writing the fix. \
+                 When you finish understanding a function or module: store how-it-works before moving on. \
+                 Store inline as you work - do not defer to end of session. \
                  Use search_memory before significant tasks and get_memory or get_memories to fetch full content by ID. \
-                 Use capture_note(summary) to record your reasoning before or after making changes - \
-                 PostToolUse captures describe only what changed, not why. \
+                 capture_note(summary) = your reasoning before/after a change, reviewed next session. \
+                 store_memory = a fact you would want to search for today or in a future session. \
+                 They are not interchangeable. \
                  Set source='reviewed' when storing memories during session-start review. \
-                 Tools: store_memory(content,type,title,[topic_key,importance,tags,facts,source]) | \
+                 Tools: store_memory(content,type,title,[topic_key,importance,tags,facts,source,pinned]) | \
                  search_memory(query,[limit]) | get_memory(id) | get_memories(ids) | \
-                 list_memories([type,tags,limit]) | capture_note(summary,[context]) | delete_memory(id)",
+                 list_memories([type,tags,limit]) | capture_note(summary,[context]) | \
+                 pin_memory(id,pin) | delete_memory(id)",
             )
     }
 }

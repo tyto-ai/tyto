@@ -8,16 +8,19 @@ use crate::{config::Config, db::Db, migrations, project_id, retrieve};
 const INSTRUCTIONS: &str = "[memso] Store every decision, discovery, gotcha, failure, and unexpected outcome. \
 Err on the side of storing - use importance (0.0-1.0) to signal value, not omission. \
 Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
-After understanding a subsystem through exploration, store a how-it-works memory before moving on. \
+When you find a bug: store it as gotcha before writing the fix. \
+When you finish understanding a function or module: store how-it-works before moving on. \
+Store inline as you work - do not defer to end of session. \
 Use topic_key to upsert existing memories. \
 Before starting work on a topic involving unknowns, call search_memory with a targeted query - \
 the automatic context above uses the raw prompt text and may miss relevant memories. \
-capture_note(summary) is a staging log reviewed at next session start - use it to record reasoning behind changes. \
-store_memory is durable and immediately searchable - use it for decisions, discoveries, and gotchas \
-that need to be findable now or later in this session. They are not interchangeable.\n\
-[memso tools] store_memory(content,type,title,[topic_key,importance,tags,facts,source]) | \
+capture_note(summary) = your reasoning before/after a change, reviewed next session. \
+store_memory = a fact you would want to search for today or in a future session. \
+They are not interchangeable.\n\
+[memso tools] store_memory(content,type,title,[topic_key,importance,tags,facts,source,pinned]) | \
 search_memory(query,[limit]) | get_memory(id) | get_memories(ids) | \
-list_memories([type,tags,limit]) | capture_note(summary,[context]) | delete_memory(id)\n";
+list_memories([type,tags,limit]) | capture_note(summary,[context]) | \
+pin_memory(id,pin) | delete_memory(id)\n";
 
 const SESSION_INSTRUCTIONS: &str = "[memso] Session start: call get_memories on the IDs in Memory Context below before proceeding. \
 Fetch aggressively - all memories with importance >= 0.7 should always be fetched; \
@@ -78,11 +81,12 @@ async fn run_prompt(
 }
 
 const STOP_INSTRUCTIONS: &str =
-    "[memso] End of response. Before finishing: have you stored all decisions, discoveries, \
-and gotchas from this response? If a decision was made, a non-obvious fact was learned, \
-or something failed unexpectedly - store it now with store_memory. \
-Use capture_note for reasoning behind changes that do not yet warrant a full memory. \
-Do not wait until end of session - memories stored now are searchable immediately.";
+    "[memso] End of turn checkpoint - store anything worth keeping before moving on:\n\
+- Found a bug or unexpected behavior?     -> store_memory type=gotcha importance>=0.8\n\
+- Understood how a subsystem works?       -> store_memory type=how-it-works\n\
+- Made a design or implementation choice? -> store_memory type=decision\n\
+- Changed your approach mid-task?         -> capture_note(why)\n\
+Store inline as you work - do not defer to end of session.";
 
 // Fires on every Claude response completion. Outputs a checkpoint prompt - no DB query.
 // Guards against infinite loops: if stop_hook_active is true, a Stop hook already
