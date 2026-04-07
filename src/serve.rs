@@ -112,16 +112,30 @@ struct SearchMemoryInput {
     limit: Option<usize>,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
-struct GetMemoryInput {
-    /// ID of the memory to fetch in full.
-    id: String,
+struct GetMemoriesInput {
+    /// IDs of memories to fetch in full.
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<String>")]
+    ids: Vec<String>,
 }
 
 #[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
-struct GetMemoriesInput {
-    /// IDs of memories to fetch in full (batch variant of get_memory).
+struct StoreMemoriesInput {
+    /// Array of memories to store. Each follows the same schema as a single store call.
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<StoreMemoryInput>")]
+    memories: Vec<StoreMemoryInput>,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeleteMemoriesInput {
+    /// IDs of memories to delete.
     // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
     #[serde_as(as = "PickFirst<(_, JsonString)>")]
     #[schemars(with = "Vec<String>")]
@@ -151,10 +165,14 @@ struct ListMemoriesInput {
     limit: Option<usize>,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
-struct PinMemoryInput {
-    /// ID of the memory to pin or unpin.
-    id: String,
+struct PinMemoriesInput {
+    /// IDs of memories to pin or unpin.
+    // Claude Code MCP client sends arrays as JSON-encoded strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, JsonString)>")]
+    #[schemars(with = "Vec<String>")]
+    ids: Vec<String>,
     /// true to pin (exempt from eviction, surfaced at session start); false to unpin.
     pin: bool,
 }
@@ -221,34 +239,47 @@ impl MemsoServer {
 
 #[tool_router]
 impl MemsoServer {
-    #[tool(description = "Store or upsert a memory. Use topic_key for upsert semantics.")]
-    async fn store_memory(&self, Parameters(input): Parameters<StoreMemoryInput>) -> Result<String, String> {
-        let project = input.project_id.unwrap_or_else(|| self.project_id.clone());
-        let embed_text = format!("{} {}", input.title, input.content);
+    #[tool(description = "Store or upsert one or more memories. Accepts an array - use for batch storage at session-start review or when storing related memories together. Use topic_key for upsert semantics.")]
+    async fn store_memories(&self, Parameters(input): Parameters<StoreMemoriesInput>) -> Result<String, String> {
+        if input.memories.is_empty() {
+            return Ok("No memories provided.".to_string());
+        }
 
-        // Compute embedding with the embedder lock held, then release before DB work.
-        let embedding = {
+        // Generate all embeddings with the lock held for the whole batch.
+        let embed_texts: Vec<String> = input.memories.iter()
+            .map(|m| format!("{} {}", m.title, m.content))
+            .collect();
+        let embeddings: Vec<_> = {
             let mut e = self.embedder.lock().await;
-            e.embed(&embed_text).map_err(|e| format!("embed failed: {e}"))?
+            let mut out = Vec::with_capacity(embed_texts.len());
+            for text in &embed_texts {
+                out.push(e.embed(text).map_err(|e| format!("embed failed: {e}"))?);
+            }
+            out
         };
 
-        let req = store::StoreRequest {
-            content: input.content,
-            memory_type: input.memory_type,
-            title: input.title,
-            tags: input.tags,
-            topic_key: input.topic_key,
-            project_id: project,
-            session_id: self.session_id.clone(),
-            importance: input.importance,
-            facts: input.facts,
-            source: input.source,
-            pinned: input.pinned,
-        };
-        store::store_memory(&self.conn, embedding, &self.write_lock, req, 30)
-            .await
-            .map(|r| if r.upserted { format!("Updated memory {}", r.id) } else { format!("Stored memory {}", r.id) })
-            .map_err(|e| format!("store_memory failed: {e}"))
+        let mut results = Vec::with_capacity(input.memories.len());
+        for (memory, embedding) in input.memories.into_iter().zip(embeddings) {
+            let project = memory.project_id.unwrap_or_else(|| self.project_id.clone());
+            let req = store::StoreRequest {
+                content: memory.content,
+                memory_type: memory.memory_type,
+                title: memory.title,
+                tags: memory.tags,
+                topic_key: memory.topic_key,
+                project_id: project,
+                session_id: self.session_id.clone(),
+                importance: memory.importance,
+                facts: memory.facts,
+                source: memory.source,
+                pinned: memory.pinned,
+            };
+            match store::store_memory(&self.conn, embedding, &self.write_lock, req, 30).await {
+                Ok(r) => results.push(if r.upserted { format!("Updated {}", r.id) } else { format!("Stored {}", r.id) }),
+                Err(e) => results.push(format!("Error: {e}")),
+            }
+        }
+        Ok(results.join("\n"))
     }
 
     #[tool(description = "Search memories using semantic + keyword search. Returns compact summaries with IDs. Use get_memory or get_memories to fetch full content.")]
@@ -268,18 +299,7 @@ impl MemsoServer {
             .map_err(|e| format!("search_memory failed: {e}"))
     }
 
-    #[tool(description = "Fetch the full content of a specific memory by ID.")]
-    async fn get_memory(&self, Parameters(input): Parameters<GetMemoryInput>) -> Result<String, String> {
-        retrieve::get_full(&self.conn, &input.id)
-            .await
-            .map_err(|e| format!("get_memory failed: {e}"))
-            .and_then(|opt| {
-                opt.map(|m| format_full_memory(&m))
-                    .ok_or_else(|| format!("Memory {} not found", input.id))
-            })
-    }
-
-    #[tool(description = "Fetch the full content of multiple memories by ID in a single call. Use when session-start context lists several IDs you need in full.")]
+    #[tool(description = "Fetch the full content of one or more memories by ID in a single call. Use when session-start context lists IDs you need in full.")]
     async fn get_memories(&self, Parameters(input): Parameters<GetMemoriesInput>) -> Result<String, String> {
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
@@ -323,24 +343,28 @@ impl MemsoServer {
             .map_err(|e| format!("capture_note failed: {e}"))
     }
 
-    #[tool(description = "Pin or unpin a memory. Pinned memories are never evicted and always surface at session start. Use pin=true to pin, pin=false to unpin.")]
-    async fn pin_memory(&self, Parameters(input): Parameters<PinMemoryInput>) -> Result<String, String> {
+    #[tool(description = "Pin or unpin one or more memories. Pinned memories are never evicted and always surface at session start. Use pin=true to pin, pin=false to unpin.")]
+    async fn pin_memories(&self, Parameters(input): Parameters<PinMemoriesInput>) -> Result<String, String> {
+        if input.ids.is_empty() {
+            return Ok("No IDs provided.".to_string());
+        }
         let pinned_val: i64 = if input.pin { 1 } else { 0 };
-        self.conn
-            .execute(
-                "UPDATE memories SET pinned = ?1 WHERE id = ?2 AND status != 'deleted'",
-                libsql::params![pinned_val, input.id.clone()],
-            )
-            .await
-            .map_err(|e| format!("pin_memory failed: {e}"))
-            .and_then(|rows| {
-                if rows > 0 {
-                    let action = if input.pin { "Pinned" } else { "Unpinned" };
-                    Ok(format!("{action} memory {}", input.id))
-                } else {
-                    Err(format!("Memory {} not found", input.id))
-                }
-            })
+        let action = if input.pin { "Pinned" } else { "Unpinned" };
+        let mut results = Vec::with_capacity(input.ids.len());
+        for id in &input.ids {
+            match self.conn
+                .execute(
+                    "UPDATE memories SET pinned = ?1 WHERE id = ?2 AND status != 'deleted'",
+                    libsql::params![pinned_val, id.clone()],
+                )
+                .await
+            {
+                Ok(rows) if rows > 0 => results.push(format!("{action} {id}")),
+                Ok(_) => results.push(format!("Not found: {id}")),
+                Err(e) => results.push(format!("Error pinning {id}: {e}")),
+            }
+        }
+        Ok(results.join("\n"))
     }
 
     #[tool(description = "Seed remote database from the local backup. Checks: replica mode is configured, backup file exists. Aborts if remote already has data unless force=true.")]
@@ -350,16 +374,23 @@ impl MemsoServer {
             .map_err(|e| format!("remote_sync failed: {e}"))
     }
 
-    #[tool(description = "Delete a memory by ID.")]
-    async fn delete_memory(&self, Parameters(input): Parameters<DeleteMemoryInput>) -> Result<String, String> {
-        self.conn
-            .execute("UPDATE memories SET status = 'deleted' WHERE id = ?1", libsql::params![input.id.clone()])
-            .await
-            .map_err(|e| format!("delete_memory failed: {e}"))
-            .and_then(|rows| {
-                if rows > 0 { Ok(format!("Deleted memory {}", input.id)) }
-                else { Err(format!("Memory {} not found", input.id)) }
-            })
+    #[tool(description = "Delete one or more memories by ID.")]
+    async fn delete_memories(&self, Parameters(input): Parameters<DeleteMemoriesInput>) -> Result<String, String> {
+        if input.ids.is_empty() {
+            return Ok("No IDs provided.".to_string());
+        }
+        let mut results = Vec::with_capacity(input.ids.len());
+        for id in &input.ids {
+            match self.conn
+                .execute("UPDATE memories SET status = 'deleted' WHERE id = ?1", libsql::params![id.clone()])
+                .await
+            {
+                Ok(rows) if rows > 0 => results.push(format!("Deleted {id}")),
+                Ok(_) => results.push(format!("Not found: {id}")),
+                Err(e) => results.push(format!("Error deleting {id}: {e}")),
+            }
+        }
+        Ok(results.join("\n"))
     }
 }
 
@@ -378,15 +409,15 @@ impl ServerHandler for MemsoServer {
                  When you find a bug: store it as gotcha before writing the fix. \
                  When you finish understanding a function or module: store how-it-works before moving on. \
                  Store inline as you work - do not defer to end of session. \
-                 Use search_memory before significant tasks and get_memory or get_memories to fetch full content by ID. \
+                 Use search_memory before significant tasks and get_memories(ids) to fetch full content by ID. \
                  capture_note(summary) = your reasoning before/after a change, reviewed next session. \
-                 store_memory = a fact you would want to search for today or in a future session. \
+                 store_memories = facts you would want to search for today or in a future session. \
                  They are not interchangeable. \
                  Set source='reviewed' when storing memories during session-start review. \
-                 Tools: store_memory(content,type,title,[topic_key,importance,tags,facts,source,pinned]) | \
-                 search_memory(query,[limit]) | get_memory(id) | get_memories(ids) | \
+                 Tools: store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
+                 search_memory(query,[limit]) | get_memories(ids) | \
                  list_memories([type,tags,limit]) | capture_note(summary,[context]) | \
-                 pin_memory(id,pin) | delete_memory(id) | remote_sync()",
+                 pin_memories(ids,pin) | delete_memories(ids) | remote_sync()",
             )
     }
 }
@@ -456,7 +487,7 @@ fn format_compact(results: &[retrieve::CompactResult]) -> String {
     let mut out = format!("--- Memory Context ({} results) ---\n", results.len());
     for r in results {
         let date = r.created_at.get(..10).unwrap_or(&r.created_at);
-        out.push_str(&format!("[{:<18} {:.2}] {}  {}  {}\n", r.memory_type, r.importance, r.id, date, r.title));
+        out.push_str(&format!("[{:<18} {:.2}] {}  {}  ~{}c  {}\n", r.memory_type, r.importance, r.id, date, r.content_len, r.title));
     }
     out.push_str("---\n");
     out

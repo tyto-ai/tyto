@@ -73,6 +73,8 @@ pub struct CompactResult {
     pub created_at: String,
     pub importance: f64,
     pub score: f64,
+    /// Character length of the full content, for budget-aware fetching decisions.
+    pub content_len: usize,
 }
 
 #[derive(Debug)]
@@ -173,7 +175,8 @@ pub async fn search(
     for id in &all_ids {
         let mut rows = conn
             .query(
-                "SELECT id, type, title, created_at, importance, access_count, last_accessed, source
+                "SELECT id, type, title, created_at, importance, access_count, last_accessed, source,
+                        length(content)
                  FROM memories WHERE id = ?1",
                 params![id.clone()],
             )
@@ -188,6 +191,7 @@ pub async fn search(
             let access_count: i64 = row.get(5)?;
             let last_accessed: Option<String> = row.get(6).ok();
             let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
+            let content_len: i64 = row.get(8).unwrap_or(0);
 
             let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
             let ret = retention_score(&memory_type, importance, days, access_count, &source);
@@ -203,7 +207,7 @@ pub async fn search(
             let boost = source_boost(query, &memory_type);
             let score = (rrf_v + rrf_b) * ret * boost;
 
-            scored.push(CompactResult { id, memory_type, title, created_at, importance, score });
+            scored.push(CompactResult { id, memory_type, title, created_at, importance, score, content_len: content_len as usize });
         }
     }
 
@@ -276,7 +280,7 @@ pub async fn search_bm25(
     let mut rows = conn
         .query(
             "SELECT m.id, m.type, m.title, m.created_at, m.importance,
-                    m.access_count, m.last_accessed, m.source
+                    m.access_count, m.last_accessed, m.source, length(m.content)
              FROM memories m
              JOIN memories_fts ON memories_fts.rowid = m.rowid
              WHERE memories_fts MATCH ?1
@@ -296,6 +300,7 @@ pub async fn search_bm25(
         let access_count: i64 = row.get(5)?;
         let last_accessed: Option<String> = row.get(6).ok();
         let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
+        let content_len: i64 = row.get(8).unwrap_or(0);
         let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
         results.push(CompactResult {
             id: row.get(0)?,
@@ -304,6 +309,7 @@ pub async fn search_bm25(
             score: retention_score(&memory_type, importance, days, access_count, &source),
             importance,
             memory_type,
+            content_len: content_len as usize,
         });
     }
 
@@ -336,7 +342,8 @@ pub async fn list(
     let ceiling = (limit * 4).max(200) as i64;
     let mut rows = conn
         .query(
-            "SELECT id, type, title, created_at, importance, access_count, last_accessed, source, tags
+            "SELECT id, type, title, created_at, importance, access_count, last_accessed, source, tags,
+                    length(content)
              FROM memories
              WHERE project_id = ?1 AND status = 'active' AND importance >= ?2
              ORDER BY created_at DESC
@@ -362,6 +369,7 @@ pub async fn list(
         let last_accessed: Option<String> = row.get(6).ok();
         let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
         let tags_json: Option<String> = row.get(8).ok();
+        let content_len: i64 = row.get(9).unwrap_or(0);
         let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
 
         tagged.push((
@@ -372,6 +380,7 @@ pub async fn list(
                 score: retention_score(&memory_type, importance, days, access_count, &source),
                 importance,
                 memory_type,
+                content_len: content_len as usize,
             },
             tags_json,
         ));

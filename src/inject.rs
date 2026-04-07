@@ -17,16 +17,16 @@ the automatic context above uses the raw prompt text and may miss relevant memor
 capture_note(summary) = your reasoning before/after a change, reviewed next session. \
 store_memory = a fact you would want to search for today or in a future session. \
 They are not interchangeable.\n\
-[memso tools] store_memory(content,type,title,[topic_key,importance,tags,facts,source,pinned]) | \
-search_memory(query,[limit]) | get_memory(id) | get_memories(ids) | \
+[memso tools] store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
+search_memory(query,[limit]) | get_memories(ids) | \
 list_memories([type,tags,limit]) | capture_note(summary,[context]) | \
-pin_memory(id,pin) | delete_memory(id)\n";
+pin_memories(ids,pin) | delete_memories(ids)\n";
 
-const SESSION_INSTRUCTIONS: &str = "[memso] Session start: call get_memories on the IDs in Memory Context below before proceeding. \
-Fetch aggressively - all memories with importance >= 0.7 should always be fetched; \
-fetch others if their title suggests relevance to the current task or open files. \
-When storing memories from Pending Review, set source='reviewed'. \
-Use capture_note(summary) to stage tentative observations for later review.\n";
+const SESSION_INSTRUCTIONS: &str = "[memso] Session start: fetch memories using get_memories. \
+Results are ordered by priority (retention score). Each shows ~NNNc - accumulate as you go and stop when total would exceed ~40,000c. \
+Hard floor: always fetch importance >= 0.8 regardless of budget. \
+Skip memories whose title is clearly irrelevant to the current task. \
+When storing from Pending Review, set source='reviewed'.\n";
 
 pub async fn run(
     inject_type: &str,
@@ -230,8 +230,8 @@ fn format_compact(results: &[retrieve::CompactResult]) -> String {
     for r in results {
         let date = r.created_at.get(..10).unwrap_or(&r.created_at);
         out.push_str(&format!(
-            "[{:<18} {:.2}] {}  {}  {}\n",
-            r.memory_type, r.importance, r.id, date, r.title
+            "[{:<18} {:.2}] {}  {}  ~{}c  {}\n",
+            r.memory_type, r.importance, r.id, date, r.content_len, r.title
         ));
     }
     out.push_str("---\n");
