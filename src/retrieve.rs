@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use libsql::params;
+use libsql::{params, params_from_iter};
 use std::collections::HashMap;
 
 use crate::embed;
@@ -227,44 +227,80 @@ pub async fn search(
     Ok(scored)
 }
 
-pub async fn get_full(conn: &libsql::Connection, id: &str) -> Result<Option<FullMemory>> {
+/// Fetch multiple memories in a single query. Returns only found memories;
+/// callers can detect missing IDs by comparing against the input set.
+pub async fn get_full_batch(
+    conn: &libsql::Connection,
+    ids: &[String],
+) -> Result<Vec<FullMemory>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT id, project_id, type, title, content, facts, tags,
+                importance, access_count, pinned, status, created_at, updated_at
+         FROM memories WHERE id IN ({placeholders})"
+    );
     let mut rows = conn
-        .query(
-            "SELECT id, project_id, type, title, content, facts, tags,
-                    importance, access_count, pinned, status, created_at, updated_at
-             FROM memories WHERE id = ?1",
-            params![id.to_string()],
-        )
+        .query(&sql, params_from_iter(ids.iter().cloned()))
         .await?;
 
-    let row = match rows.next().await? {
-        Some(r) => r,
-        None => return Ok(None),
-    };
+    let mut memories = Vec::new();
+    while let Some(row) = rows.next().await? {
+        memories.push(FullMemory {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            memory_type: row.get(2)?,
+            title: row.get(3)?,
+            content: row.get(4)?,
+            facts: row.get(5).ok(),
+            tags: row.get(6).ok(),
+            importance: row.get(7)?,
+            access_count: row.get(8)?,
+            pinned: row.get::<i64>(9)? != 0,
+            status: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+        });
+    }
 
-    // Increment access count
-    let _ = conn
-        .execute(
-            "UPDATE memories SET access_count = access_count + 1, last_accessed = ?1 WHERE id = ?2",
-            params![Utc::now().to_rfc3339(), id.to_string()],
-        )
-        .await;
+    // Increment access count for all fetched memories in one query.
+    let update_sql = format!(
+        "UPDATE memories SET access_count = access_count + 1, last_accessed = ? \
+         WHERE id IN ({placeholders})"
+    );
+    let update_params: Vec<libsql::Value> = std::iter::once(libsql::Value::Text(Utc::now().to_rfc3339()))
+        .chain(ids.iter().cloned().map(libsql::Value::Text))
+        .collect();
+    let _ = conn.execute(&update_sql, params_from_iter(update_params)).await;
 
-    Ok(Some(FullMemory {
-        id: row.get(0)?,
-        project_id: row.get(1)?,
-        memory_type: row.get(2)?,
-        title: row.get(3)?,
-        content: row.get(4)?,
-        facts: row.get(5).ok(),
-        tags: row.get(6).ok(),
-        importance: row.get(7)?,
-        access_count: row.get(8)?,
-        pinned: row.get::<i64>(9)? != 0,
-        status: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
-    }))
+    Ok(memories)
+}
+
+/// Pin or unpin a batch of memories in a single query. Returns the number of rows updated.
+pub async fn pin_batch(conn: &libsql::Connection, ids: &[String], pin: bool) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "UPDATE memories SET pinned = ? WHERE id IN ({placeholders}) AND status != 'deleted'"
+    );
+    let params: Vec<libsql::Value> = std::iter::once(libsql::Value::Integer(if pin { 1 } else { 0 }))
+        .chain(ids.iter().cloned().map(libsql::Value::Text))
+        .collect();
+    Ok(conn.execute(&sql, params_from_iter(params)).await?)
+}
+
+/// Soft-delete a batch of memories in a single query. Returns the number of rows updated.
+pub async fn delete_batch(conn: &libsql::Connection, ids: &[String]) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!("UPDATE memories SET status = 'deleted' WHERE id IN ({placeholders})");
+    Ok(conn.execute(&sql, params_from_iter(ids.iter().cloned())).await?)
 }
 
 /// BM25-only search: no embedding required. Used by inject --type prompt to avoid

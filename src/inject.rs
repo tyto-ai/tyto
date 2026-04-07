@@ -22,10 +22,12 @@ search_memory(query,[limit]) | get_memories(ids) | \
 list_memories([type,tags,limit]) | capture_note(summary,[context]) | \
 pin_memories(ids,pin) | delete_memories(ids)\n";
 
-const SESSION_INSTRUCTIONS: &str = "[memso] Session start: fetch memories using get_memories. \
-Results are ordered by priority (retention score). Each shows ~NNNc - accumulate as you go and stop when total would exceed ~40,000c. \
-Hard floor: always fetch importance >= 0.8 regardless of budget. \
-Skip memories whose title is clearly irrelevant to the current task. \
+const SESSION_INSTRUCTIONS: &str = "[memso] Session start — BEFORE responding to any user message, \
+you MUST call get_memories to load full memory content up to the budget. \
+Work through the list from top to bottom: accumulate the ~NNNc value for each entry, \
+and call get_memories with those IDs. Continue until adding the next entry would exceed ~40,000c total. \
+Fetching less than the budget allows is NOT acceptable — you must maximise loaded context. \
+Hard floor: always include all memories with importance >= 0.8, regardless of budget. \
 When storing from Pending Review, set source='reviewed'.\n";
 
 pub async fn run(
@@ -40,6 +42,19 @@ pub async fn run(
         return run_stop(budget);
     }
 
+    if let Err(e) = run_inner(inject_type, project_override, query_override, limit, budget).await {
+        println!("[memso ERROR: {e:#}]");
+    }
+    Ok(())
+}
+
+async fn run_inner(
+    inject_type: &str,
+    project_override: Option<String>,
+    query_override: Option<String>,
+    limit: usize,
+    budget: usize,
+) -> Result<()> {
     let cwd = env::current_dir()?;
     let config = Config::load(&cwd)?;
 

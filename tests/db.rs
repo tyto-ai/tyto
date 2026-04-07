@@ -2,6 +2,29 @@
 /// These cover store, retrieve, and migrations together.
 use memso::{migrations, retrieve, store};
 
+/// Insert a minimal memory row directly, bypassing store (no embedding needed).
+async fn insert_raw(db: &TestDb, id: &str, title: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    db.conn
+        .execute(
+            "INSERT INTO memories \
+             (id, project_id, type, title, content, created_at, updated_at, content_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            libsql::params![
+                id.to_string(),
+                "test-project".to_string(),
+                "fact".to_string(),
+                title.to_string(),
+                "test content".to_string(),
+                now.clone(),
+                now,
+                id.to_string()
+            ],
+        )
+        .await
+        .unwrap();
+}
+
 struct TestDb {
     pub conn: libsql::Connection,
     // Keep _db alive: dropping it destroys the in-memory database.
@@ -70,17 +93,17 @@ async fn store_and_get_full_roundtrip() {
     assert!(!result.id.is_empty());
     assert!(!result.upserted);
 
-    let mem = retrieve::get_full(&db.conn, &result.id).await.unwrap().unwrap();
+    let mem = retrieve::get_full_batch(&db.conn, &[result.id.clone()]).await.unwrap().into_iter().next().unwrap();
     assert_eq!(mem.content, "This is a test memory about Rust");
     assert_eq!(mem.memory_type, "decision");
     assert!((mem.importance - 0.7).abs() < 0.001);
 }
 
 #[tokio::test]
-async fn get_full_returns_none_for_unknown_id() {
+async fn get_full_batch_returns_empty_for_unknown_ids() {
     let db = migrated_db().await;
-    let result = retrieve::get_full(&db.conn, "does-not-exist").await.unwrap();
-    assert!(result.is_none());
+    let results = retrieve::get_full_batch(&db.conn, &["does-not-exist".to_string()]).await.unwrap();
+    assert!(results.is_empty());
 }
 
 // --- dedup ---
@@ -125,7 +148,8 @@ async fn topic_key_upsert_updates_content() {
     assert_eq!(r1.id, r2.id, "upsert should keep the same ID");
     assert!(r2.upserted);
 
-    let mem = retrieve::get_full(&db.conn, &r1.id).await.unwrap().unwrap();
+    let mut batch = retrieve::get_full_batch(&db.conn, &[r1.id.clone()]).await.unwrap();
+    let mem = batch.pop().unwrap();
     assert_eq!(mem.content, "Updated content");
 }
 
@@ -193,4 +217,102 @@ async fn search_bm25_finds_by_keyword() {
 
     assert!(!results.is_empty(), "BM25 should find the stored memory by keyword");
     assert!(results.iter().any(|r| r.title == "Rust ownership"));
+}
+
+// --- get_full_batch ---
+
+#[tokio::test]
+async fn get_full_batch_returns_all_found() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+    insert_raw(&db, "id-b", "Memory B").await;
+
+    let ids = vec!["id-a".to_string(), "id-b".to_string()];
+    let results = retrieve::get_full_batch(&db.conn, &ids).await.unwrap();
+
+    assert_eq!(results.len(), 2);
+    let titles: Vec<&str> = results.iter().map(|m| m.title.as_str()).collect();
+    assert!(titles.contains(&"Memory A"));
+    assert!(titles.contains(&"Memory B"));
+}
+
+#[tokio::test]
+async fn get_full_batch_omits_missing_ids() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+
+    let ids = vec!["id-a".to_string(), "nonexistent".to_string()];
+    let results = retrieve::get_full_batch(&db.conn, &ids).await.unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "id-a");
+}
+
+// --- pin_batch ---
+
+#[tokio::test]
+async fn pin_batch_pins_and_unpins() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+    insert_raw(&db, "id-b", "Memory B").await;
+
+    let ids = vec!["id-a".to_string(), "id-b".to_string()];
+
+    let n = retrieve::pin_batch(&db.conn, &ids, true).await.unwrap();
+    assert_eq!(n, 2);
+    let results = retrieve::get_full_batch(&db.conn, &ids).await.unwrap();
+    assert!(results.iter().all(|m| m.pinned));
+
+    let n = retrieve::pin_batch(&db.conn, &ids, false).await.unwrap();
+    assert_eq!(n, 2);
+    let results = retrieve::get_full_batch(&db.conn, &ids).await.unwrap();
+    assert!(results.iter().all(|m| !m.pinned));
+}
+
+#[tokio::test]
+async fn pin_batch_missing_ids_not_counted() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+
+    let ids = vec!["id-a".to_string(), "nonexistent".to_string()];
+    let n = retrieve::pin_batch(&db.conn, &ids, true).await.unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn pin_batch_skips_deleted_memories() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+
+    let ids = vec!["id-a".to_string()];
+    retrieve::delete_batch(&db.conn, &ids).await.unwrap();
+
+    let n = retrieve::pin_batch(&db.conn, &ids, true).await.unwrap();
+    assert_eq!(n, 0);
+}
+
+// --- delete_batch ---
+
+#[tokio::test]
+async fn delete_batch_soft_deletes() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+    insert_raw(&db, "id-b", "Memory B").await;
+
+    let ids = vec!["id-a".to_string(), "id-b".to_string()];
+    let n = retrieve::delete_batch(&db.conn, &ids).await.unwrap();
+    assert_eq!(n, 2);
+
+    let results = retrieve::get_full_batch(&db.conn, &ids).await.unwrap();
+    assert!(results.iter().all(|m| m.status == "deleted"));
+}
+
+#[tokio::test]
+async fn delete_batch_missing_ids_not_counted() {
+    let db = migrated_db().await;
+    insert_raw(&db, "id-a", "Memory A").await;
+
+    let ids = vec!["id-a".to_string(), "nonexistent".to_string()];
+    let n = retrieve::delete_batch(&db.conn, &ids).await.unwrap();
+    assert_eq!(n, 1);
 }

@@ -74,13 +74,17 @@ impl Config {
 
     /// Resolve auth_token: expand "${VAR}" syntax, then fall back to REMOTE_AUTH_TOKEN env var.
     fn resolve_env_vars(&mut self) {
+        self.resolve_env_vars_with(|k| env::var(k).ok());
+    }
+
+    fn resolve_env_vars_with(&mut self, env: impl Fn(&str) -> Option<String>) {
         if let Some(token) = &self.backend.auth_token
             && let Some(var) = token.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
         {
-            self.backend.auth_token = env::var(var).ok();
+            self.backend.auth_token = env(var);
         }
         if self.backend.auth_token.is_none() {
-            self.backend.auth_token = env::var("REMOTE_AUTH_TOKEN").ok();
+            self.backend.auth_token = env("REMOTE_AUTH_TOKEN");
         }
     }
 
@@ -184,22 +188,30 @@ mod tests {
 
     #[test]
     fn resolve_env_vars_substitutes_var() {
-        // SAFETY: single-threaded test, no other threads reading this var.
-        unsafe { std::env::set_var("_MEMSO_TEST_TOKEN", "supersecret") };
+        let env = std::collections::HashMap::from([
+            ("_MEMSO_TEST_TOKEN", "supersecret"),
+        ]);
         let mut cfg = Config::default();
         cfg.backend.auth_token = Some("${_MEMSO_TEST_TOKEN}".to_string());
-        cfg.resolve_env_vars();
+        cfg.resolve_env_vars_with(|k| env.get(k).map(|s| s.to_string()));
         assert_eq!(cfg.backend.auth_token, Some("supersecret".to_string()));
-        unsafe { std::env::remove_var("_MEMSO_TEST_TOKEN") };
     }
 
     #[test]
     fn resolve_env_vars_missing_var_becomes_none() {
-        // SAFETY: single-threaded test, no other threads reading this var.
-        unsafe { std::env::remove_var("_MEMSO_NONEXISTENT_VAR") };
         let mut cfg = Config::default();
         cfg.backend.auth_token = Some("${_MEMSO_NONEXISTENT_VAR}".to_string());
-        cfg.resolve_env_vars();
+        cfg.resolve_env_vars_with(|_| None);
         assert_eq!(cfg.backend.auth_token, None);
+    }
+
+    #[test]
+    fn resolve_env_vars_falls_back_to_remote_auth_token() {
+        let env = std::collections::HashMap::from([
+            ("REMOTE_AUTH_TOKEN", "fallback-token"),
+        ]);
+        let mut cfg = Config::default();
+        cfg.resolve_env_vars_with(|k| env.get(k).map(|s| s.to_string()));
+        assert_eq!(cfg.backend.auth_token, Some("fallback-token".to_string()));
     }
 }

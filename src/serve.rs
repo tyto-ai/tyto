@@ -174,6 +174,9 @@ struct PinMemoriesInput {
     #[schemars(with = "Vec<String>")]
     ids: Vec<String>,
     /// true to pin (exempt from eviction, surfaced at session start); false to unpin.
+    // Claude Code MCP client sends booleans as strings - see comment above.
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[schemars(with = "bool")]
     pin: bool,
 }
 
@@ -304,17 +307,21 @@ impl MemsoServer {
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
         }
-        let mut parts: Vec<String> = Vec::new();
-        // Sequential fetches are acceptable here: this is called at most once per session
-        // with a small fixed ID set, and libsql connections are not concurrency-safe to
-        // share across spawned tasks without Arc cloning + careful lifetime management.
-        for id in &input.ids {
-            match retrieve::get_full(&self.conn, id).await {
-                Ok(Some(m)) => parts.push(format_full_memory(&m)),
-                Ok(None) => parts.push(format!("Memory {id} not found")),
-                Err(e) => parts.push(format!("Error fetching {id}: {e}")),
+        let memories = retrieve::get_full_batch(&self.conn, &input.ids)
+            .await
+            .map_err(|e| format!("get_memories failed: {e}"))?;
+
+        // Index by ID so we can output in the requested order and detect missing ones.
+        let by_id: std::collections::HashMap<&str, &retrieve::FullMemory> =
+            memories.iter().map(|m| (m.id.as_str(), m)).collect();
+
+        let parts: Vec<String> = input.ids.iter().map(|id| {
+            match by_id.get(id.as_str()) {
+                Some(m) => format_full_memory(m),
+                None => format!("Memory {id} not found"),
             }
-        }
+        }).collect();
+
         Ok(parts.join("\n---\n"))
     }
 
@@ -348,23 +355,13 @@ impl MemsoServer {
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
         }
-        let pinned_val: i64 = if input.pin { 1 } else { 0 };
+        let total = input.ids.len();
         let action = if input.pin { "Pinned" } else { "Unpinned" };
-        let mut results = Vec::with_capacity(input.ids.len());
-        for id in &input.ids {
-            match self.conn
-                .execute(
-                    "UPDATE memories SET pinned = ?1 WHERE id = ?2 AND status != 'deleted'",
-                    libsql::params![pinned_val, id.clone()],
-                )
-                .await
-            {
-                Ok(rows) if rows > 0 => results.push(format!("{action} {id}")),
-                Ok(_) => results.push(format!("Not found: {id}")),
-                Err(e) => results.push(format!("Error pinning {id}: {e}")),
-            }
+        match retrieve::pin_batch(&self.conn, &input.ids, input.pin).await {
+            Ok(n) if n as usize == total => Ok(format!("{action} {n} memories")),
+            Ok(n) => Ok(format!("{action} {n}/{total} memories ({} not found)", total - n as usize)),
+            Err(e) => Err(format!("pin_memories failed: {e}")),
         }
-        Ok(results.join("\n"))
     }
 
     #[tool(description = "Seed remote database from the local backup. Checks: replica mode is configured, backup file exists. Aborts if remote already has data unless force=true.")]
@@ -379,18 +376,12 @@ impl MemsoServer {
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
         }
-        let mut results = Vec::with_capacity(input.ids.len());
-        for id in &input.ids {
-            match self.conn
-                .execute("UPDATE memories SET status = 'deleted' WHERE id = ?1", libsql::params![id.clone()])
-                .await
-            {
-                Ok(rows) if rows > 0 => results.push(format!("Deleted {id}")),
-                Ok(_) => results.push(format!("Not found: {id}")),
-                Err(e) => results.push(format!("Error deleting {id}: {e}")),
-            }
+        let total = input.ids.len();
+        match retrieve::delete_batch(&self.conn, &input.ids).await {
+            Ok(n) if n as usize == total => Ok(format!("Deleted {n} memories")),
+            Ok(n) => Ok(format!("Deleted {n}/{total} memories ({} not found)", total - n as usize)),
+            Err(e) => Err(format!("delete_memories failed: {e}")),
         }
-        Ok(results.join("\n"))
     }
 }
 

@@ -39,6 +39,27 @@ impl Db {
         };
 
         let conn = db.connect().context("Failed to connect to database")?;
+
+        // Enable WAL mode and a generous busy timeout for local mode only.
+        // WAL allows concurrent readers while a writer holds the lock; busy_timeout
+        // makes writers retry for up to 5s instead of immediately returning SQLITE_BUSY.
+        // This makes local mode safe for multiple concurrent memso processes (e.g.
+        // multiple agents or IDE windows on the same project).
+        //
+        // Skipped for replica mode: the local replica file is managed by libsql's
+        // sync engine and pragma behaviour there is undocumented - leave it alone.
+        //
+        // Known gap: the in-process WriteLock dedup guard does not extend across
+        // processes, so concurrent agents may occasionally write duplicate memories.
+        // Acceptable for v1; a shared-lock or daemon model can address this later.
+        if matches!(config.backend.mode, BackendMode::Local) {
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"
+            )
+            .await
+            .context("Failed to set WAL mode / busy_timeout")?;
+        }
+
         Ok(Self { conn, _db: db })
     }
 }
