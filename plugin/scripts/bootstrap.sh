@@ -21,6 +21,20 @@ BINARY="${CLAUDE_PLUGIN_DATA}/memso"
 VERSION_FILE="${CLAUDE_PLUGIN_DATA}/version"
 REPO="beefsack/memso"
 
+# Allow an explicit binary override - useful in development or for custom builds.
+# Set MEMSO_BINARY_OVERRIDE to an absolute path to skip the GitHub download entirely.
+if [[ -n "${MEMSO_BINARY_OVERRIDE:-}" ]]; then
+  if [[ ! -f "${MEMSO_BINARY_OVERRIDE}" ]]; then
+    echo "[memso] MEMSO_BINARY_OVERRIDE is set but '${MEMSO_BINARY_OVERRIDE}' does not exist" >&2
+    exit 0
+  fi
+  mkdir -p "${CLAUDE_PLUGIN_DATA}"
+  cp -f "${MEMSO_BINARY_OVERRIDE}" "${BINARY}"
+  chmod +x "${BINARY}"
+  printf '%s' "${COMPOSITE}" > "${VERSION_FILE}"
+  exit 0
+fi
+
 # Detect OS and architecture.
 OS="$(uname -s)"
 ARCH="$(uname -m)"

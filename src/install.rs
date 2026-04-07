@@ -3,11 +3,10 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 const MCP_SERVER_NAME: &str = "memso";
-const HOOK_SESSION_CMD: &str = "memso inject --type session --budget 32000";
-const HOOK_PROMPT_CMD: &str = "memso inject --type prompt --budget 32000";
-const HOOK_CAPTURE_CMD: &str = "memso capture";
-const HOOK_STOP_CMD: &str = "memso inject --type stop --budget 32000";
-const HOOK_COMPACT_CMD: &str = "memso inject --type compact --budget 32000";
+
+fn hook_cmd(bin: &str, suffix: &str) -> String {
+    format!("{bin} {suffix}")
+}
 
 pub struct InstallResult {
     pub mcp_added: bool,
@@ -17,18 +16,23 @@ pub struct InstallResult {
     pub stop_hook_added: bool,
     pub compact_hook_added: bool,
     pub settings_path: PathBuf,
+    pub binary_path: PathBuf,
 }
 
 pub fn run(dry_run: bool) -> Result<InstallResult> {
+    let binary_path = std::env::current_exe()
+        .context("Could not determine path to memso binary")?;
+    let bin = binary_path.to_string_lossy();
+
     let path = settings_path()?;
     let mut root = read_or_empty(&path)?;
 
-    let mcp_added = ensure_mcp_server(&mut root)?;
-    let session_hook_added = ensure_hook(&mut root, "SessionStart", HOOK_SESSION_CMD)?;
-    let prompt_hook_added = ensure_hook(&mut root, "UserPromptSubmit", HOOK_PROMPT_CMD)?;
-    let capture_hook_added = ensure_hook(&mut root, "PostToolUse", HOOK_CAPTURE_CMD)?;
-    let stop_hook_added = ensure_hook(&mut root, "Stop", HOOK_STOP_CMD)?;
-    let compact_hook_added = ensure_hook(&mut root, "PostCompact", HOOK_COMPACT_CMD)?;
+    let mcp_added = ensure_mcp_server(&mut root, &binary_path)?;
+    let session_hook_added = ensure_hook(&mut root, "SessionStart", &hook_cmd(&bin, "inject --type session --budget 32000"))?;
+    let prompt_hook_added = ensure_hook(&mut root, "UserPromptSubmit", &hook_cmd(&bin, "inject --type prompt --budget 32000"))?;
+    let capture_hook_added = ensure_hook(&mut root, "PostToolUse", &hook_cmd(&bin, "capture"))?;
+    let stop_hook_added = ensure_hook(&mut root, "Stop", &hook_cmd(&bin, "inject --type stop --budget 32000"))?;
+    let compact_hook_added = ensure_hook(&mut root, "PostCompact", &hook_cmd(&bin, "inject --type compact --budget 32000"))?;
 
     let changed = mcp_added || session_hook_added || prompt_hook_added
         || capture_hook_added || stop_hook_added || compact_hook_added;
@@ -45,12 +49,14 @@ pub fn run(dry_run: bool) -> Result<InstallResult> {
         stop_hook_added,
         compact_hook_added,
         settings_path: path,
+        binary_path,
     })
 }
 
 /// Ensure `mcpServers.memso` exists with the correct command and args.
 /// Returns true if a change was made.
-fn ensure_mcp_server(root: &mut Value) -> Result<bool> {
+fn ensure_mcp_server(root: &mut Value, binary_path: &Path) -> Result<bool> {
+    let cmd = binary_path.to_string_lossy();
     let obj = root
         .as_object_mut()
         .context("settings.json root is not a JSON object")?;
@@ -61,7 +67,7 @@ fn ensure_mcp_server(root: &mut Value) -> Result<bool> {
     }
 
     if let Some(existing) = servers.get(MCP_SERVER_NAME) {
-        let cmd_ok = existing.get("command").and_then(|v| v.as_str()) == Some("memso");
+        let cmd_ok = existing.get("command").and_then(|v| v.as_str()) == Some(cmd.as_ref());
         let args_ok = existing
             .get("args")
             .and_then(|v| v.as_array())
@@ -74,7 +80,7 @@ fn ensure_mcp_server(root: &mut Value) -> Result<bool> {
 
     servers[MCP_SERVER_NAME] = json!({
         "type": "stdio",
-        "command": "memso",
+        "command": cmd,
         "args": ["serve"]
     });
     Ok(true)
@@ -150,27 +156,30 @@ mod tests {
     #[test]
     fn ensure_mcp_server_adds_when_absent() {
         let mut root = json!({});
-        let changed = ensure_mcp_server(&mut root).unwrap();
+        let bin = Path::new("/usr/local/bin/memso");
+        let changed = ensure_mcp_server(&mut root, bin).unwrap();
         assert!(changed);
-        assert_eq!(root["mcpServers"]["memso"]["command"], "memso");
+        assert_eq!(root["mcpServers"]["memso"]["command"], "/usr/local/bin/memso");
         assert_eq!(root["mcpServers"]["memso"]["args"], json!(["serve"]));
     }
 
     #[test]
     fn ensure_mcp_server_skips_when_correct() {
         let mut root = json!({
-            "mcpServers": {"memso": {"type": "stdio", "command": "memso", "args": ["serve"]}}
+            "mcpServers": {"memso": {"type": "stdio", "command": "/usr/local/bin/memso", "args": ["serve"]}}
         });
-        let changed = ensure_mcp_server(&mut root).unwrap();
+        let bin = Path::new("/usr/local/bin/memso");
+        let changed = ensure_mcp_server(&mut root, bin).unwrap();
         assert!(!changed);
     }
 
     #[test]
     fn ensure_mcp_server_fixes_wrong_args() {
         let mut root = json!({
-            "mcpServers": {"memso": {"type": "stdio", "command": "memso", "args": ["wrong"]}}
+            "mcpServers": {"memso": {"type": "stdio", "command": "/usr/local/bin/memso", "args": ["wrong"]}}
         });
-        let changed = ensure_mcp_server(&mut root).unwrap();
+        let bin = Path::new("/usr/local/bin/memso");
+        let changed = ensure_mcp_server(&mut root, bin).unwrap();
         assert!(changed, "should overwrite when args are wrong");
         assert_eq!(root["mcpServers"]["memso"]["args"], json!(["serve"]));
     }

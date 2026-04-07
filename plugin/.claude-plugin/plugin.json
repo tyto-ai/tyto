@@ -8,6 +8,5 @@
   },
   "repository": "https://github.com/beefsack/memso",
   "license": "Apache-2.0",
-  "keywords": ["memory", "persistence", "mcp", "agent"],
-  "hooks": "hooks/hooks.json"
+  "keywords": ["memory", "persistence", "mcp", "agent"]
 }

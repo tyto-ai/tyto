@@ -1,0 +1,12 @@
+{
+  "name": "memso-dev",
+  "owner": {
+    "name": "memso contributors"
+  },
+  "plugins": [
+    {
+      "name": "memso",
+      "source": "./plugin"
+    }
+  ]
+}
