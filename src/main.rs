@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use memso::{capture, config::Config, inject, install, remote, serve, status};
+use memso::{config::Config, inject, install, remote, serve, status};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -29,11 +29,6 @@ enum Command {
         limit: usize,
         #[arg(long, default_value_t = 9500, help = "Max output bytes")]
         budget: usize,
-    },
-    /// Capture a PostToolUse hook event for later review at session start
-    Capture {
-        #[arg(long, help = "Override project ID")]
-        project: Option<String>,
     },
     /// Manage remote database sync
     Remote {
@@ -86,11 +81,6 @@ async fn main() -> Result<()> {
                 eprintln!("memso inject error: {e}");
             }
         }
-        Command::Capture { project } => {
-            if let Err(e) = capture::run(project).await {
-                eprintln!("memso capture error: {e}");
-            }
-        }
         Command::Remote { subcommand } => {
             let cwd = std::env::current_dir()?;
             let config = Config::load(&cwd)?;
@@ -122,11 +112,6 @@ async fn main() -> Result<()> {
             } else {
                 println!("UserPromptSubmit hook already configured - skipped");
             }
-            if result.capture_hook_added {
-                println!("{prefix}Added PostToolUse hook");
-            } else {
-                println!("PostToolUse hook already configured - skipped");
-            }
             if result.stop_hook_added {
                 println!("{prefix}Added Stop hook");
             } else {
@@ -138,7 +123,7 @@ async fn main() -> Result<()> {
                 println!("PostCompact hook already configured - skipped");
             }
             if !result.mcp_added && !result.session_hook_added && !result.prompt_hook_added
-                && !result.capture_hook_added && !result.stop_hook_added && !result.compact_hook_added {
+                && !result.stop_hook_added && !result.compact_hook_added {
                 println!("Nothing to do - memso is already fully configured.");
             } else if !dry_run {
                 println!("\nDone. Restart Claude Code for changes to take effect.");

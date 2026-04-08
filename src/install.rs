@@ -12,7 +12,6 @@ pub struct InstallResult {
     pub mcp_added: bool,
     pub session_hook_added: bool,
     pub prompt_hook_added: bool,
-    pub capture_hook_added: bool,
     pub stop_hook_added: bool,
     pub compact_hook_added: bool,
     pub settings_path: PathBuf,
@@ -30,12 +29,11 @@ pub fn run(dry_run: bool) -> Result<InstallResult> {
     let mcp_added = ensure_mcp_server(&mut root, &binary_path)?;
     let session_hook_added = ensure_hook(&mut root, "SessionStart", &hook_cmd(&bin, "inject --type session --budget 32000"))?;
     let prompt_hook_added = ensure_hook(&mut root, "UserPromptSubmit", &hook_cmd(&bin, "inject --type prompt --budget 32000"))?;
-    let capture_hook_added = ensure_hook(&mut root, "PostToolUse", &hook_cmd(&bin, "capture"))?;
     let stop_hook_added = ensure_hook(&mut root, "Stop", &hook_cmd(&bin, "inject --type stop --budget 32000"))?;
     let compact_hook_added = ensure_hook(&mut root, "PostCompact", &hook_cmd(&bin, "inject --type compact --budget 32000"))?;
 
     let changed = mcp_added || session_hook_added || prompt_hook_added
-        || capture_hook_added || stop_hook_added || compact_hook_added;
+        || stop_hook_added || compact_hook_added;
 
     if changed && !dry_run {
         write_settings(&path, &root)?;
@@ -45,7 +43,6 @@ pub fn run(dry_run: bool) -> Result<InstallResult> {
         mcp_added,
         session_hook_added,
         prompt_hook_added,
-        capture_hook_added,
         stop_hook_added,
         compact_hook_added,
         settings_path: path,

@@ -26,17 +26,6 @@
         ]
       }
     ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_DATA}/memso capture"
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "matcher": "",
