@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+
 use crate::{
     remote,
     config::Config,
@@ -30,16 +31,48 @@ use crate::{
     store::{self, WriteLock},
 };
 
-#[derive(Clone)]
-struct MemsoServer {
+/// Database connection and embedding model, available once background init completes.
+struct DbReady {
     conn: Arc<libsql::Connection>,
     embedder: Arc<Mutex<Embedder>>,
+}
+
+/// State of the database for two-phase startup.
+#[derive(Clone)]
+enum DbState {
+    /// Background init (replica sync + embedder load) still in progress.
+    Syncing,
+    /// Ready — tools may proceed.
+    Ready(Arc<DbReady>),
+    /// Init failed permanently; all tool calls return this error.
+    Failed(String),
+}
+
+#[derive(Clone)]
+struct MemsoServer {
+    db: tokio::sync::watch::Receiver<DbState>,
     write_lock: WriteLock,
     session_id: String,
     project_id: String,
     config: Arc<Config>,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
+}
+
+impl MemsoServer {
+    /// Returns the ready state or an actionable error string if still syncing or failed.
+    /// Call at the top of every tool handler that needs the DB or embedder.
+    fn try_ready(&self) -> Result<Arc<DbReady>, String> {
+        match &*self.db.borrow() {
+            DbState::Syncing => Err(
+                "memso is syncing the memory database locally (initial replication). \
+                 Please wait a moment and retry."
+                    .to_string(),
+            ),
+            DbState::Ready(r) => Ok(Arc::clone(r)),
+            DbState::Failed(msg) => Err(format!("memso database initialisation failed: {msg}")),
+        }
+    }
 }
 
 // --- Tool input schemas ---
@@ -231,7 +264,7 @@ impl MemsoServer {
             format!(
                 "Please run `{cmd}` to enable remote sync for memso. \
                  You will need --url <url> and --token <token> (get these from the Turso dashboard or `turso db show` / `turso db tokens create`). \
-                 Set REMOTE_AUTH_TOKEN in your environment and restart Claude Code when done."
+                 Set MEMSO_REMOTE_AUTH_TOKEN in your environment and restart Claude Code when done."
             ),
         )]
     }
@@ -243,6 +276,7 @@ impl MemsoServer {
 impl MemsoServer {
     #[tool(description = "Store or upsert one or more memories. Accepts an array - use for batch storage at session-start review or when storing related memories together. Use topic_key for upsert semantics.")]
     async fn store_memories(&self, Parameters(input): Parameters<StoreMemoriesInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         if input.memories.is_empty() {
             return Ok("No memories provided.".to_string());
         }
@@ -252,7 +286,7 @@ impl MemsoServer {
             .map(|m| format!("{} {}", m.title, m.content))
             .collect();
         let embeddings: Vec<_> = {
-            let mut e = self.embedder.lock().await;
+            let mut e = ready.embedder.lock().await;
             let mut out = Vec::with_capacity(embed_texts.len());
             for text in &embed_texts {
                 out.push(e.embed(text).map_err(|e| format!("embed failed: {e}"))?);
@@ -276,7 +310,7 @@ impl MemsoServer {
                 source: memory.source,
                 pinned: memory.pinned,
             };
-            match store::store_memory(&self.conn, embedding, &self.write_lock, req, 30).await {
+            match store::store_memory(&ready.conn, embedding, &self.write_lock, req, 30).await {
                 Ok(r) => results.push(if r.upserted { format!("Updated {}", r.id) } else { format!("Stored {}", r.id) }),
                 Err(e) => results.push(format!("Error: {e}")),
             }
@@ -286,17 +320,18 @@ impl MemsoServer {
 
     #[tool(description = "Search memories using semantic + keyword search. Returns compact summaries with IDs. Pass detail=\"summary\" to also include facts and tags. Use get_memories(ids) to fetch full content.")]
     async fn search_memory(&self, Parameters(input): Parameters<SearchMemoryInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         let project = input.project_id.unwrap_or_else(|| self.project_id.clone());
         let limit = input.limit.unwrap_or(5);
         let summary = input.detail.as_deref() == Some("summary");
 
         // Compute embedding with the embedder lock held, then release before DB work.
         let embedding = {
-            let mut e = self.embedder.lock().await;
+            let mut e = ready.embedder.lock().await;
             e.embed(&input.query).map_err(|e| format!("embed failed: {e}"))?
         };
 
-        retrieve::search(&self.conn, embedding, &input.query, &project, limit)
+        retrieve::search(&ready.conn, embedding, &input.query, &project, limit)
             .await
             .map(|results| {
                 if results.is_empty() {
@@ -312,10 +347,11 @@ impl MemsoServer {
 
     #[tool(description = "Fetch the full content of one or more memories by ID in a single call. Use when session-start context lists IDs you need in full.")]
     async fn get_memories(&self, Parameters(input): Parameters<GetMemoriesInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
         }
-        let memories = retrieve::get_full_batch(&self.conn, &input.ids)
+        let memories = retrieve::get_full_batch(&ready.conn, &input.ids)
             .await
             .map_err(|e| format!("get_memories failed: {e}"))?;
 
@@ -335,10 +371,11 @@ impl MemsoServer {
 
     #[tool(description = "List memories with optional filters. Returns compact summaries. Pass detail=\"summary\" to also include facts and tags.")]
     async fn list_memories(&self, Parameters(input): Parameters<ListMemoriesInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         let project = input.project_id.unwrap_or_else(|| self.project_id.clone());
         let limit = input.limit.unwrap_or(20);
         let summary = input.detail.as_deref() == Some("summary");
-        retrieve::list(&self.conn, &project, input.memory_type.as_deref(), &input.tags, limit, 0.0)
+        retrieve::list(&ready.conn, &project, input.memory_type.as_deref(), &input.tags, limit, 0.0)
             .await
             .map(|results| {
                 if results.is_empty() {
@@ -354,9 +391,10 @@ impl MemsoServer {
 
     #[tool(description = "Stage a lightweight note for review at next session start. Use during exploration for tentative observations not yet ready for a full memory.")]
     async fn capture_note(&self, Parameters(input): Parameters<CaptureNoteInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        self.conn
+        ready.conn
             .execute(
                 "INSERT INTO raw_captures (id, project_id, captured_at, tool_name, summary, raw_data) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -369,12 +407,13 @@ impl MemsoServer {
 
     #[tool(description = "Pin or unpin one or more memories. Pinned memories are never evicted and always surface at session start. Use pin=true to pin, pin=false to unpin.")]
     async fn pin_memories(&self, Parameters(input): Parameters<PinMemoriesInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
         }
         let total = input.ids.len();
         let action = if input.pin { "Pinned" } else { "Unpinned" };
-        match retrieve::pin_batch(&self.conn, &input.ids, input.pin).await {
+        match retrieve::pin_batch(&ready.conn, &input.ids, input.pin).await {
             Ok(n) if n as usize == total => Ok(format!("{action} {n} memories")),
             Ok(n) => Ok(format!("{action} {n}/{total} memories ({} not found)", total - n as usize)),
             Err(e) => Err(format!("pin_memories failed: {e}")),
@@ -390,11 +429,12 @@ impl MemsoServer {
 
     #[tool(description = "Delete one or more memories by ID.")]
     async fn delete_memories(&self, Parameters(input): Parameters<DeleteMemoriesInput>) -> Result<String, String> {
+        let ready = self.try_ready()?;
         if input.ids.is_empty() {
             return Ok("No IDs provided.".to_string());
         }
         let total = input.ids.len();
-        match retrieve::delete_batch(&self.conn, &input.ids).await {
+        match retrieve::delete_batch(&ready.conn, &input.ids).await {
             Ok(n) if n as usize == total => Ok(format!("Deleted {n} memories")),
             Ok(n) => Ok(format!("Deleted {n}/{total} memories ({} not found)", total - n as usize)),
             Err(e) => Err(format!("delete_memories failed: {e}")),
@@ -434,9 +474,10 @@ pub async fn run(config: Config) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let pid = project_id::resolve(&cwd, config.memory.project_id.as_deref());
 
-    // Install crash log + panic hook before any fallible work so panics at any
-    // startup phase are captured. The crash log is checked by `memso inject` on
-    // the next session start and surfaced to the AI as a warning to relay to the user.
+    // Set up crash log path and panic hook before any fallible work.
+    // Any error (panic or otherwise) that occurs after this point is written to
+    // crash.log, which `memso inject` reads on the next session start and surfaces
+    // to the AI as a warning.
     let crash_log = config.db_path()
         .parent()
         .map(|p| p.join("crash.log"))
@@ -452,8 +493,109 @@ pub async fn run(config: Config) -> Result<()> {
         let _ = std::fs::write(&crash_log_hook, &msg);
     }));
 
+    let result = serve_inner(config, pid).await;
+    if let Err(ref e) = result {
+        let msg = format!("[{}] ERROR: {e:#}\n", chrono::Utc::now().format("%H:%M:%S"));
+        eprintln!("{}", msg.trim());
+        let _ = std::fs::write(&crash_log, &msg);
+    }
+    result
+}
+
+async fn serve_inner(config: Config, project_id: String) -> Result<()> {
+    // Set up the watch channel: None = syncing, Some = ready or failed.
+    let (db_tx, db_rx) = tokio::sync::watch::channel(DbState::Syncing);
+    let mut db_rx_monitor = db_rx.clone();
+
+    // Acquire an exclusive lock on serve.lock for this process's entire lifetime.
+    // The OS releases it automatically on any exit (clean, crash, or SIGKILL), so
+    // inject can use a non-blocking lock attempt to detect whether we are running.
+    let lock_file_path = config.serve_lock_path();
+    let ready_file = config.serve_ready_path();
+    if let Some(parent) = lock_file_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(false)
+        .open(&lock_file_path)
+        .and_then(|f| { fs4::fs_std::FileExt::lock_exclusive(&f)?; Ok(f) })
+        .map_err(|e| anyhow::anyhow!("Failed to acquire serve.lock: {e}"))?;
+    // Keep lock_file alive (lock held) until end of function.
+
+    let session_id = Uuid::new_v4().to_string();
+    eprintln!("memso: session {session_id}, project \"{project_id}\"");
+
+    let server = MemsoServer {
+        db: db_rx,
+        write_lock: store::new_write_lock(),
+        session_id,
+        project_id,
+        config: Arc::new(config.clone()),
+        tool_router: MemsoServer::tool_router(),
+        prompt_router: MemsoServer::prompt_router(),
+    };
+
+    // Start MCP transport immediately — Claude Code sees us as connected right away.
+    // Tool calls during the sync window return a "syncing" message instead of blocking.
+    let service = server.serve(stdio()).await?;
+    eprintln!("memso: ready (syncing database in background)");
+
+    // Spawn background task: open DB, run migrations, load embedder.
+    let ready_file_bg = ready_file.clone();
+    tokio::spawn(async move {
+        match init_db_and_embedder(&config).await {
+            Ok(ready) => {
+                let _ = db_tx.send(DbState::Ready(Arc::new(ready)));
+                let _ = std::fs::write(&ready_file_bg, "");
+                eprintln!("memso: database ready");
+            }
+            Err(e) => {
+                eprintln!("memso: database init failed: {e:#}");
+                let _ = db_tx.send(DbState::Failed(format!("{e:#}")));
+            }
+        }
+    });
+
+    // Wait for client disconnect, shutdown signal, or a permanent DB init failure.
+    // DB init failure is re-raised as an error so run() writes it to crash.log.
+    let serve_result: Result<()> = tokio::select! {
+        result = service.waiting() => result.map(|_| ()).map_err(Into::into),
+        _ = shutdown_signal() => {
+            eprintln!("memso: shutting down");
+            Ok(())
+        }
+        _ = wait_db_failed(&mut db_rx_monitor) => {
+            let msg = match &*db_rx_monitor.borrow() {
+                DbState::Failed(msg) => msg.clone(),
+                // Sender dropped without sending Failed — likely a panic in the init task.
+                // The panic hook will have written a more detailed message to crash.log.
+                _ => "background init task exited unexpectedly (possible panic — check crash.log)".to_string(),
+            };
+            Err(anyhow::anyhow!("Database init failed: {msg}"))
+        }
+    };
+
+    // ready_file is cleaned up; lock_file is dropped here which releases the OS lock.
+    let _ = std::fs::remove_file(&ready_file);
+    drop(lock_file);
+    serve_result
+}
+
+/// Resolves once the DB state transitions to [`DbState::Failed`].
+async fn wait_db_failed(rx: &mut tokio::sync::watch::Receiver<DbState>) {
+    loop {
+        if matches!(&*rx.borrow(), DbState::Failed(_)) {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return; // sender dropped — shouldn't happen in normal operation
+        }
+    }
+}
+
+async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
     eprintln!("memso: opening database...");
-    let db = Db::open(&config).await?;
+    let db = Db::open(config).await?;
     let conn = Arc::new(db.conn);
 
     eprintln!("memso: running migrations...");
@@ -462,33 +604,7 @@ pub async fn run(config: Config) -> Result<()> {
     eprintln!("memso: loading embedding model (first run will download ~22MB)...");
     let embedder = Arc::new(Mutex::new(Embedder::load()?));
 
-    let session_id = Uuid::new_v4().to_string();
-    eprintln!("memso: session {session_id}, project \"{pid}\"");
-    eprintln!("memso: ready");
-
-    let server = MemsoServer {
-        conn,
-        embedder,
-        write_lock: store::new_write_lock(),
-        session_id,
-        project_id: pid,
-        config: Arc::new(config),
-        tool_router: MemsoServer::tool_router(),
-        prompt_router: MemsoServer::prompt_router(),
-    };
-
-    let service = server.serve(stdio()).await?;
-
-    // Wait for the MCP client to disconnect OR a shutdown signal (SIGTERM/SIGINT).
-    // Awaiting the signal lets tokio flush pending async tasks and libsql write
-    // its WAL cleanly, preventing local replica corruption on Claude Code restart.
-    tokio::select! {
-        result = service.waiting() => { result?; }
-        _ = shutdown_signal() => {
-            eprintln!("memso: shutting down");
-        }
-    }
-    Ok(())
+    Ok(DbReady { conn, embedder })
 }
 
 async fn shutdown_signal() {

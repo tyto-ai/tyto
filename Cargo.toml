@@ -60,6 +60,7 @@ hex = "0.4"
 
 # XDG/platform config and cache directories
 dirs = "6"
+fs4 = "0.13.1"
 
 
 [profile.release]

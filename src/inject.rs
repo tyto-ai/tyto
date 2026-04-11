@@ -23,6 +23,32 @@ search_memory(query,[limit,detail]) | get_memories(ids) | \
 list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
 pin_memories(ids,pin) | delete_memories(ids)\n";
 
+/// Returns true if `memso serve` is running but has not yet finished syncing.
+///
+/// Detection: try a non-blocking exclusive lock on `serve.lock`. The OS holds
+/// that lock for `serve`'s entire lifetime and releases it automatically on any
+/// exit — there are no stale files to worry about.
+fn is_serve_syncing(config: &Config) -> bool {
+    use fs4::fs_std::FileExt;
+    if config.serve_ready_path().exists() {
+        return false; // already ready — no need to check lock
+    }
+    let lock_path = config.serve_lock_path();
+    let Ok(file) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&lock_path) else {
+        return false;
+    };
+    // try_lock_exclusive returns Ok(true) if we got the lock (no server running),
+    // Ok(false) if another process holds it (server is running and still syncing).
+    match file.try_lock_exclusive() {
+        Ok(true) => {
+            let _ = file.unlock();
+            false
+        }
+        Ok(false) => true,
+        Err(_) => false,
+    }
+}
+
 fn build_session_instructions(session_path: Option<&std::path::Path>) -> String {
     match session_path {
         None => String::new(),
@@ -78,6 +104,17 @@ async fn run_inner(
              Inform the user of this before doing anything else - \
              recent memories may not have been saved.\nCrash report: {crash}"
         );
+    }
+
+    // If `memso serve` is running but not yet ready (initial replica sync in progress),
+    // return a helpful message immediately instead of racing with the server on Db::open.
+    if is_serve_syncing(&config) {
+        println!(
+            "[memso] memso is syncing the memory database locally (initial replication). \
+             Memories are not yet available. Once sync completes the memory index will \
+             load automatically on your next prompt."
+        );
+        return Ok(());
     }
 
     let db = Db::open(&config).await?;
