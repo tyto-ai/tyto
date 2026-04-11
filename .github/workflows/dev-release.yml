@@ -56,6 +56,9 @@ jobs:
       - name: Ensure dev release exists
         # The || true handles the race where multiple parallel jobs all try to create
         # the release at the same time - only one succeeds, the rest fail silently.
+        # shell: bash required - Windows runners default to PowerShell which misparses
+        # the || operator and -- flags in multi-line shell expressions.
+        shell: bash
         run: |
           gh release view dev --repo ${{ github.repository }} \
             || gh release create dev \
@@ -68,6 +71,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifact
+        shell: bash
         run: gh release upload dev ${{ matrix.artifact }} --clobber --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
