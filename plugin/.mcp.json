@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "memso": {
-      "command": "${CLAUDE_PLUGIN_DATA}/memso",
-      "args": ["serve"]
-    }
-  }
-}

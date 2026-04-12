@@ -10,20 +10,11 @@
   "plugins": [
     {
       "name": "memso",
-      "source": "./plugin",
+      "source": "./agents/claude",
       "description": "Persistent memory for AI agents - stores decisions, discoveries, and gotchas across sessions using local vector + BM25 search.",
-      "homepage": "https://github.com/beefsack/memso",
-      "license": "Apache-2.0",
-      "keywords": ["memory", "persistence", "mcp", "agent"]
-    },
-    {
-      "name": "memso-dev",
-      "source": "./plugin-dev",
-      "description": "memso dev channel - installs the latest build from the main branch. For stable use the 'memso' plugin.",
       "homepage": "https://github.com/beefsack/memso",
       "license": "Apache-2.0",
       "keywords": ["memory", "persistence", "mcp", "agent"]
     }
   ]
 }
-
