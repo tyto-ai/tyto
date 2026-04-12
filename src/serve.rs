@@ -497,7 +497,13 @@ pub async fn run(config: Config) -> Result<()> {
     if let Err(ref e) = result {
         let msg = format!("[{}] ERROR: {e:#}\n", chrono::Utc::now().format("%H:%M:%S"));
         eprintln!("{}", msg.trim());
-        let _ = std::fs::write(&crash_log, &msg);
+        // Append rather than overwrite: the panic hook may have already written to
+        // crash.log and we don't want to erase it.
+        use std::io::Write as _;
+        let _ = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open(&crash_log)
+            .and_then(|mut f| writeln!(f, "{}", msg.trim()));
     }
     result
 }
@@ -582,13 +588,26 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
 }
 
 /// Resolves once the DB state transitions to [`DbState::Failed`].
+/// Resolves once the DB state transitions to [`DbState::Failed`], or if the
+/// background init task exits before reaching [`DbState::Ready`] (panic case).
+///
+/// Does NOT resolve when init succeeds: after a successful init the sender is
+/// dropped with state=Ready, and triggering the failure arm then would be wrong.
 async fn wait_db_failed(rx: &mut tokio::sync::watch::Receiver<DbState>) {
     loop {
-        if matches!(&*rx.borrow(), DbState::Failed(_)) {
-            return;
+        match &*rx.borrow() {
+            DbState::Failed(_) => return,
+            // Init succeeded — park forever so the select never picks this arm.
+            DbState::Ready(_) => std::future::pending::<()>().await,
+            DbState::Syncing => {}
         }
         if rx.changed().await.is_err() {
-            return; // sender dropped — shouldn't happen in normal operation
+            // Sender dropped. If state is Ready, init succeeded — park forever.
+            // If state is still Syncing, the task panicked before completing — trigger.
+            if matches!(&*rx.borrow(), DbState::Ready(_)) {
+                std::future::pending::<()>().await;
+            }
+            return;
         }
     }
 }

@@ -3,7 +3,7 @@ use chrono::Utc;
 use std::env;
 use std::io::{IsTerminal, Read};
 
-use crate::{config::Config, db::Db, migrations, project_id, retrieve};
+use crate::{config::{BackendMode, Config}, db::Db, migrations, project_id, retrieve};
 
 const INSTRUCTIONS: &str = "[memso] Store every decision, discovery, gotcha, failure, and unexpected outcome. \
 Err on the side of storing - use importance (0.0-1.0) to signal value, not omission. \
@@ -23,27 +23,25 @@ search_memory(query,[limit,detail]) | get_memories(ids) | \
 list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
 pin_memories(ids,pin) | delete_memories(ids)\n";
 
-/// Returns true if `memso serve` is running but has not yet finished syncing.
+/// Returns true if `memso serve` is running (whether still initializing or fully ready).
 ///
-/// Detection: try a non-blocking exclusive lock on `serve.lock`. The OS holds
+/// Fast path: serve.ready exists -> serve is up, return true immediately.
+/// Slow path: try a non-blocking exclusive lock on `serve.lock`. The OS holds
 /// that lock for `serve`'s entire lifetime and releases it automatically on any
 /// exit — there are no stale files to worry about.
-fn is_serve_syncing(config: &Config) -> bool {
+fn is_serve_running(config: &Config) -> bool {
     use fs4::fs_std::FileExt;
     if config.serve_ready_path().exists() {
-        return false; // already ready — no need to check lock
+        return true; // serve is fully up
     }
     let lock_path = config.serve_lock_path();
     let Ok(file) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&lock_path) else {
         return false;
     };
     // try_lock_exclusive returns Ok(true) if we got the lock (no server running),
-    // Ok(false) if another process holds it (server is running and still syncing).
+    // Ok(false) if another process holds it (server is running, still initializing).
     match file.try_lock_exclusive() {
-        Ok(true) => {
-            let _ = file.unlock();
-            false
-        }
+        Ok(true) => { let _ = file.unlock(); false }
         Ok(false) => true,
         Err(_) => false,
     }
@@ -106,14 +104,16 @@ async fn run_inner(
         );
     }
 
-    // If `memso serve` is running but not yet ready (initial replica sync in progress),
-    // return a helpful message immediately instead of racing with the server on Db::open.
-    if is_serve_syncing(&config) {
-        println!(
-            "[memso] memso is syncing the memory database locally (initial replication). \
-             Memories are not yet available. Once sync completes the memory index will \
-             load automatically on your next prompt."
-        );
+    // If `memso serve` is running (initializing or ready), skip Db::open to avoid
+    // racing on the DB file. Not applicable for remote mode: Turso handles concurrent
+    // connections safely and there is no local file to contend on.
+    if !matches!(config.backend.mode, BackendMode::Remote) && is_serve_running(&config) {
+        if inject_type == "session" || inject_type == "compact" {
+            println!(
+                "{INSTRUCTIONS}[memso] MCP server is running — memory context is available via tools. \
+                 Use search_memory / list_memories for context retrieval this session."
+            );
+        }
         return Ok(());
     }
 
@@ -201,23 +201,34 @@ async fn run_session(
     // List all memories above the importance floor sorted by retention score.
     let results = retrieve::list(conn, project_id, None, &[], 500, 0.4).await?;
 
-    // Build full memory content for the session file.
+    // Select IDs whose content fits within the full-content budget using the
+    // content_len from the compact query, then fetch only that subset.
     let mut included_in_file = 0usize;
     let mut memories_content = String::new();
     if !results.is_empty() {
-        let all_ids: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
-        let full_memories = retrieve::get_full_batch(conn, &all_ids).await?;
-        let full_map: std::collections::HashMap<String, retrieve::FullMemory> =
-            full_memories.into_iter().map(|m| (m.id.clone(), m)).collect();
-
         let mut accumulated = 0usize;
-        for (i, compact) in results.iter().enumerate() {
-            if let Some(mem) = full_map.get(&compact.id) {
-                let entry = format_full_memory(mem);
-                accumulated += entry.len();
-                memories_content.push_str(&entry);
-                included_in_file = i + 1;
+        let full_ids: Vec<String> = results
+            .iter()
+            .take_while(|r| {
                 if accumulated >= FULL_CONTENT_BUDGET {
+                    return false;
+                }
+                accumulated += r.content_len;
+                true
+            })
+            .map(|r| r.id.clone())
+            .collect();
+
+        if !full_ids.is_empty() {
+            let full_memories = retrieve::get_full_batch(conn, &full_ids).await?;
+            let full_map: std::collections::HashMap<String, retrieve::FullMemory> =
+                full_memories.into_iter().map(|m| (m.id.clone(), m)).collect();
+
+            for (i, compact) in results.iter().enumerate() {
+                if let Some(mem) = full_map.get(&compact.id) {
+                    memories_content.push_str(&format_full_memory(mem));
+                    included_in_file = i + 1;
+                } else {
                     break;
                 }
             }
