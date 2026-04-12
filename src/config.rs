@@ -3,11 +3,19 @@ use serde::Deserialize;
 use std::env;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendMode {
     #[default]
     Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteMode {
+    #[default]
+    Direct,
     Replica,
 }
 
@@ -15,6 +23,9 @@ pub enum BackendMode {
 pub struct BackendConfig {
     #[serde(default)]
     pub mode: BackendMode,
+    /// Only relevant when mode = remote. Defaults to direct.
+    #[serde(default)]
+    pub remote_mode: RemoteMode,
     pub local_path: Option<String>,
     pub remote_url: Option<String>,
     /// Supports "${ENV_VAR}" substitution
@@ -25,6 +36,7 @@ impl std::fmt::Debug for BackendConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BackendConfig")
             .field("mode", &self.mode)
+            .field("remote_mode", &self.remote_mode)
             .field("local_path", &self.local_path)
             .field("remote_url", &self.remote_url)
             .field("auth_token", &self.auth_token.as_deref().map(|_| "[REDACTED]"))
@@ -107,7 +119,12 @@ impl Config {
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let filename = match self.backend.mode {
             BackendMode::Local => "memory.db",
-            BackendMode::Replica => "memory.replica.db",
+            BackendMode::Remote => match self.backend.remote_mode {
+                RemoteMode::Replica => "memory.replica.db",
+                // Direct mode has no local DB file; this path is used only to derive
+                // the .memso/ directory for serve.lock, serve.ready, and crash.log.
+                RemoteMode::Direct => "memory.remote.db",
+            },
         };
         base.join(".memso").join(filename)
     }
@@ -184,9 +201,19 @@ mod tests {
     }
 
     #[test]
-    fn db_path_replica_mode() {
+    fn db_path_remote_direct_mode() {
         let mut cfg = Config::default();
-        cfg.backend.mode = BackendMode::Replica;
+        cfg.backend.mode = BackendMode::Remote;
+        cfg.backend.remote_mode = RemoteMode::Direct;
+        cfg.source_path = Some(PathBuf::from("/some/project/.memso.toml"));
+        assert_eq!(cfg.db_path(), PathBuf::from("/some/project/.memso/memory.remote.db"));
+    }
+
+    #[test]
+    fn db_path_remote_replica_mode() {
+        let mut cfg = Config::default();
+        cfg.backend.mode = BackendMode::Remote;
+        cfg.backend.remote_mode = RemoteMode::Replica;
         cfg.source_path = Some(PathBuf::from("/some/project/.memso.toml"));
         assert_eq!(cfg.db_path(), PathBuf::from("/some/project/.memso/memory.replica.db"));
     }
@@ -201,7 +228,8 @@ mod tests {
     #[test]
     fn local_db_path_always_returns_memory_db() {
         let mut cfg = Config::default();
-        cfg.backend.mode = BackendMode::Replica;
+        cfg.backend.mode = BackendMode::Remote;
+        cfg.backend.remote_mode = RemoteMode::Replica;
         cfg.source_path = Some(PathBuf::from("/some/project/.memso.toml"));
         assert_eq!(cfg.local_db_path(), PathBuf::from("/some/project/.memso/memory.db"));
     }

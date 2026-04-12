@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use libsql::{Builder, Connection};
-use crate::config::{BackendMode, Config};
+use crate::config::{BackendMode, RemoteMode, Config};
 
 pub async fn enable(
     config: &Config,
@@ -67,7 +67,7 @@ pub async fn enable(
     // The local database stays at memory.db. Replica mode uses memory.replica.db,
     // so the two files never conflict and memory.db serves as a natural backup.
     update_config(config, &url)?;
-    println!("      Config updated to replica mode.");
+    println!("      Config updated to remote/replica mode.");
     println!("      Local backup retained at {}", local_path.display());
 
     println!();
@@ -84,9 +84,12 @@ pub async fn enable(
 /// 2. Remote memory count is 0 (unless force)
 /// 3. `.memso/memory.db` exists (the natural backup left in place by `remote enable`)
 pub async fn sync(config: &Config, force: bool) -> Result<String> {
-    if !matches!(config.backend.mode, BackendMode::Replica) {
+    if !matches!(
+        (&config.backend.mode, &config.backend.remote_mode),
+        (BackendMode::Remote, RemoteMode::Replica)
+    ) {
         return Ok(
-            "Not in replica mode. Run `memso remote enable` first to configure cloud sync."
+            "Not in remote/replica mode. Run `memso remote enable` first to configure cloud sync."
                 .to_string(),
         );
     }
@@ -95,12 +98,12 @@ pub async fn sync(config: &Config, force: bool) -> Result<String> {
         .backend
         .remote_url
         .as_deref()
-        .context("replica mode requires backend.remote_url")?;
+        .context("remote replica mode requires backend.remote_url")?;
     let token = config
         .backend
         .auth_token
         .as_deref()
-        .context("replica mode requires backend.auth_token (set MEMSO_REMOTE_AUTH_TOKEN)")?;
+        .context("remote replica mode requires backend.auth_token (set MEMSO_REMOTE_AUTH_TOKEN)")?;
 
     let local_path = config.local_db_path();
     if !local_path.exists() {
@@ -310,7 +313,8 @@ fn update_config(config: &Config, remote_url: &str) -> Result<()> {
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
     let backend_table = backend.as_table_mut().context("backend is not a TOML table")?;
 
-    backend_table.insert("mode".to_string(), toml::Value::String("replica".to_string()));
+    backend_table.insert("mode".to_string(), toml::Value::String("remote".to_string()));
+    backend_table.insert("remote_mode".to_string(), toml::Value::String("replica".to_string()));
     backend_table.insert(
         "remote_url".to_string(),
         toml::Value::String(remote_url.to_string()),

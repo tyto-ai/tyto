@@ -12,7 +12,13 @@ pub async fn run(config: &Config) -> Result<()> {
     migrations::run(&conn).await?;
 
     let db_path = config.db_path();
-    let mode = format!("{:?}", config.backend.mode).to_lowercase();
+    let mode = match config.backend.mode {
+        crate::config::BackendMode::Local => "local".to_string(),
+        crate::config::BackendMode::Remote => format!(
+            "remote/{}",
+            format!("{:?}", config.backend.remote_mode).to_lowercase()
+        ),
+    };
 
     let total: i64 = conn
         .query("SELECT COUNT(*) FROM memories WHERE status = 'active'", ())
@@ -57,7 +63,7 @@ pub async fn run(config: &Config) -> Result<()> {
         println!("last stored:  never");
     }
 
-    if matches!(config.backend.mode, crate::config::BackendMode::Replica) {
+    if matches!(config.backend.mode, crate::config::BackendMode::Remote) {
         match &config.backend.remote_url {
             Some(url) => println!("remote:       {url}"),
             None => println!("remote:       (not configured)"),

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use libsql::{Builder, Connection, Database};
 use std::path::Path;
 
-use crate::config::{BackendMode, Config};
+use crate::config::{BackendMode, RemoteMode, Config};
 
 pub struct Db {
     pub conn: Connection,
@@ -20,25 +20,38 @@ impl Db {
                     .await
                     .with_context(|| format!("Failed to open local DB at {}", path.display()))?
             }
-            BackendMode::Replica => {
-                let path = config.db_path();
-                ensure_parent_dir(&path)?;
+            BackendMode::Remote => {
                 let url = config
                     .backend
                     .remote_url
                     .as_deref()
-                    .context("replica mode requires backend.remote_url")?;
+                    .context("remote mode requires backend.remote_url")?;
                 let token = config
                     .backend
                     .auth_token
                     .as_deref()
-                    .context("replica mode requires backend.auth_token")?;
-                let path_str = path.to_str().context("replica DB path is not valid UTF-8")?;
-                // No timeout: initial sync duration scales with DB size and network speed.
-                // A hard timeout risks killing mid-sync and leaving the replica in a
-                // partial state. libsql WAL is crash-safe so a SIGTERM mid-sync is
-                // recoverable via the purge-and-retry path in open_replica_with_recovery.
-                open_replica_with_recovery(path_str, path.as_ref(), url, token).await?
+                    .context("remote mode requires backend.auth_token")?;
+                match config.backend.remote_mode {
+                    RemoteMode::Direct => {
+                        // No local file for direct mode; ensure .memso/ directory exists for
+                        // serve.lock, serve.ready, and crash.log.
+                        ensure_parent_dir(&config.db_path())?;
+                        Builder::new_remote(url.to_string(), token.to_string())
+                            .build()
+                            .await
+                            .with_context(|| format!("Failed to connect to remote at {url}"))?
+                    }
+                    RemoteMode::Replica => {
+                        let path = config.db_path();
+                        ensure_parent_dir(&path)?;
+                        let path_str = path.to_str().context("replica DB path is not valid UTF-8")?;
+                        // No timeout: initial sync duration scales with DB size and network speed.
+                        // A hard timeout risks killing mid-sync and leaving the replica in a
+                        // partial state. libsql WAL is crash-safe so a SIGTERM mid-sync is
+                        // recoverable via the purge-and-retry path in open_replica_with_recovery.
+                        open_replica_with_recovery(path_str, path.as_ref(), url, token).await?
+                    }
+                }
             }
         };
 
