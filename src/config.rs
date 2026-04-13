@@ -30,7 +30,6 @@ pub struct BackendConfig {
     /// Only relevant when mode = remote. Defaults to direct.
     #[serde(default)]
     pub remote_mode: RemoteMode,
-    pub local_path: Option<String>,
     pub remote_url: Option<String>,
     pub auth_token: Option<String>,
 }
@@ -40,7 +39,6 @@ impl std::fmt::Debug for BackendConfig {
         f.debug_struct("BackendConfig")
             .field("mode", &self.mode)
             .field("remote_mode", &self.remote_mode)
-            .field("local_path", &self.local_path)
             .field("remote_url", &self.remote_url)
             .field("auth_token", &self.auth_token.as_deref().map(|_| "[REDACTED]"))
             .finish()
@@ -75,7 +73,6 @@ impl Config {
     ///   MEMSO_BACKEND__REMOTE_MODE -> backend.remote_mode (direct|replica)
     ///   MEMSO_BACKEND__REMOTE_URL  -> backend.remote_url
     ///   MEMSO_BACKEND__AUTH_TOKEN  -> backend.auth_token
-    ///   MEMSO_BACKEND__LOCAL_PATH  -> backend.local_path
     ///   MEMSO_MEMORY__PROJECT_ID   -> memory.project_id
     pub fn load(start_dir: &Path) -> Result<Self> {
         let config_path = find_project_config(start_dir)
@@ -103,9 +100,6 @@ impl Config {
     /// the other mode's data, and the local file serves as a natural backup after
     /// `memso remote enable` without any explicit rename step.
     pub fn db_path(&self) -> PathBuf {
-        if let Some(ref p) = self.backend.local_path {
-            return PathBuf::from(p);
-        }
         let base = self
             .source_path
             .as_ref()
@@ -148,9 +142,6 @@ impl Config {
     /// the current backend mode. Used by `remote enable` and `remote sync` as the
     /// source/seed database - it is the natural backup after switching to replica mode.
     pub fn local_db_path(&self) -> PathBuf {
-        if let Some(ref p) = self.backend.local_path {
-            return PathBuf::from(p);
-        }
         let base = self
             .source_path
             .as_ref()
@@ -206,13 +197,6 @@ mod tests {
         cfg.backend.remote_mode = RemoteMode::Replica;
         cfg.source_path = Some(PathBuf::from("/some/project/.memso.toml"));
         assert_eq!(cfg.db_path(), PathBuf::from("/some/project/.memso/memory.replica.db"));
-    }
-
-    #[test]
-    fn db_path_respects_override() {
-        let mut cfg = Config::default();
-        cfg.backend.local_path = Some("/custom/path.db".to_string());
-        assert_eq!(cfg.db_path(), PathBuf::from("/custom/path.db"));
     }
 
     #[test]
