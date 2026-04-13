@@ -1,4 +1,8 @@
 use anyhow::{Context, Result};
+use figment::{
+    providers::{Env, Format, Toml},
+    Figment,
+};
 use serde::Deserialize;
 use shellexpand;
 use std::env;
@@ -62,56 +66,57 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load config by walking up from `start_dir`, then global, then defaults.
+    /// Load config with layered precedence: defaults < file < env vars.
+    ///
+    /// File resolution: walk up from `start_dir` looking for `.memso.toml`,
+    /// then fall back to the global config at `$XDG_CONFIG_HOME/memso/config.toml`.
+    ///
+    /// Env var mapping: `MEMSO_<SECTION>__<FIELD>` overrides `section.field`.
+    /// Double underscore separates nesting levels; single underscore is part of the name.
+    ///   MEMSO_BACKEND__MODE        -> backend.mode        (local|remote)
+    ///   MEMSO_BACKEND__REMOTE_MODE -> backend.remote_mode (direct|replica)
+    ///   MEMSO_BACKEND__REMOTE_URL  -> backend.remote_url
+    ///   MEMSO_BACKEND__AUTH_TOKEN  -> backend.auth_token
+    ///   MEMSO_BACKEND__LOCAL_PATH  -> backend.local_path
+    ///   MEMSO_MEMORY__PROJECT_ID   -> memory.project_id
     pub fn load(start_dir: &Path) -> Result<Self> {
-        if let Some(path) = find_project_config(start_dir) {
-            let mut cfg = load_file(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            cfg.source_path = Some(path);
-            cfg.resolve_env_vars();
-            return Ok(cfg);
-        }
+        let config_path = find_project_config(start_dir)
+            .or_else(|| global_config_path().filter(|p| p.exists()));
 
-        if let Some(path) = global_config_path()
-            && path.exists()
-        {
-            let mut cfg = load_file(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            cfg.source_path = Some(path);
-            cfg.resolve_env_vars();
-            return Ok(cfg);
+        let mut fig = Figment::new();
+        if let Some(ref path) = config_path {
+            fig = fig.merge(Toml::file(path));
         }
+        // Double underscore is the figment-idiomatic level separator.
+        // MEMSO_BACKEND__AUTH_TOKEN -> backend.auth_token
+        // MEMSO_MEMORY__PROJECT_ID  -> memory.project_id
+        fig = fig.merge(Env::prefixed("MEMSO_").split("__"));
 
-        Ok(Config::default())
+        let mut cfg: Config = fig.extract().context("Failed to load configuration")?;
+        cfg.source_path = config_path;
+        cfg.expand_string_vars();
+        Ok(cfg)
     }
 
-    /// Expand shell-style env vars in string config fields, then fall back to
-    /// MEMSO_REMOTE_AUTH_TOKEN for auth_token if still unset.
-    fn resolve_env_vars(&mut self) {
-        self.resolve_env_vars_with(|k| env::var(k).ok());
+    /// Expand shell-style `$VAR`, `${VAR}`, and `${VAR:-default}` references
+    /// inside string config values. Useful when a value is stored in the config
+    /// file as e.g. `auth_token = "$MY_TOKEN"` to avoid hardcoding secrets.
+    /// Direct env var overrides via `MEMSO_BACKEND_AUTH_TOKEN` are preferred.
+    fn expand_string_vars(&mut self) {
+        self.expand_string_vars_with(|k| env::var(k).ok());
     }
 
-    fn resolve_env_vars_with(&mut self, env_fn: impl Fn(&str) -> Option<String>) {
-        // Expand $VAR, ${VAR}, and ${VAR:-default} in string config fields.
-        // When a referenced variable is undefined and no default is given, the field
-        // becomes None so callers get a clean "not configured" state rather than a
-        // literal "$VARNAME" string being used as a token or URL.
+    fn expand_string_vars_with(&mut self, env_fn: impl Fn(&str) -> Option<String>) {
         let expand = |s: &str| -> Option<String> {
-            shellexpand::env_with_context(s, |var| {
-                env_fn(var).ok_or(()).map(Some)
-            })
-            .ok()
-            .map(|cow| cow.into_owned())
+            shellexpand::env_with_context(s, |var| env_fn(var).ok_or(()).map(Some))
+                .ok()
+                .map(|cow| cow.into_owned())
         };
-
         if let Some(token) = self.backend.auth_token.clone() {
             self.backend.auth_token = expand(&token);
         }
         if let Some(url) = self.backend.remote_url.clone() {
             self.backend.remote_url = expand(&url);
-        }
-        if self.backend.auth_token.is_none() {
-            self.backend.auth_token = env_fn("MEMSO_REMOTE_AUTH_TOKEN");
         }
     }
 
@@ -198,11 +203,6 @@ fn global_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("memso").join("config.toml"))
 }
 
-fn load_file(path: &Path) -> Result<Config> {
-    let text = std::fs::read_to_string(path)?;
-    let cfg: Config = toml::from_str(&text)?;
-    Ok(cfg)
-}
 
 #[cfg(test)]
 mod tests {
@@ -250,31 +250,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_env_vars_substitutes_var() {
-        let env = std::collections::HashMap::from([
-            ("_MEMSO_TEST_TOKEN", "supersecret"),
-        ]);
+    fn expand_string_vars_substitutes_var() {
+        let env = std::collections::HashMap::from([("_MEMSO_TEST_TOKEN", "supersecret")]);
         let mut cfg = Config::default();
         cfg.backend.auth_token = Some("${_MEMSO_TEST_TOKEN}".to_string());
-        cfg.resolve_env_vars_with(|k| env.get(k).map(|s| s.to_string()));
+        cfg.expand_string_vars_with(|k| env.get(k).map(|s| s.to_string()));
         assert_eq!(cfg.backend.auth_token, Some("supersecret".to_string()));
     }
 
     #[test]
-    fn resolve_env_vars_missing_var_becomes_none() {
+    fn expand_string_vars_missing_var_becomes_none() {
         let mut cfg = Config::default();
         cfg.backend.auth_token = Some("${_MEMSO_NONEXISTENT_VAR}".to_string());
-        cfg.resolve_env_vars_with(|_| None);
+        cfg.expand_string_vars_with(|_| None);
         assert_eq!(cfg.backend.auth_token, None);
-    }
-
-    #[test]
-    fn resolve_env_vars_falls_back_to_memso_remote_auth_token() {
-        let env = std::collections::HashMap::from([
-            ("MEMSO_REMOTE_AUTH_TOKEN", "fallback-token"),
-        ]);
-        let mut cfg = Config::default();
-        cfg.resolve_env_vars_with(|k| env.get(k).map(|s| s.to_string()));
-        assert_eq!(cfg.backend.auth_token, Some("fallback-token".to_string()));
     }
 }

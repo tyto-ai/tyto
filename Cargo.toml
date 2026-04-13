@@ -28,6 +28,9 @@ serde_json = "1"
 # Config file parsing
 toml = "1"
 
+# Layered configuration: file < env vars, with automatic MEMSO_SECTION_FIELD mapping
+figment = { version = "0.10", features = ["toml", "env"] }
+
 # UUIDs for session_id and memory IDs
 uuid = { version = "1", features = ["v4"] }
 
