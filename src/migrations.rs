@@ -93,10 +93,9 @@ async fn apply_v002(conn: &Connection, _migration: &Migration) -> Result<()> {
             libsql::params![],
         )
         .await
+        && !e.to_string().contains("duplicate column name")
     {
-        if !e.to_string().contains("duplicate column name") {
-            return Err(anyhow::anyhow!("v002 migration: {e}"));
-        }
+        return Err(anyhow::anyhow!("v002 migration: {e}"));
     }
     conn.execute(
         "UPDATE memory_vectors SET embed_model = ?1 WHERE embed_model = ''",
@@ -112,10 +111,10 @@ async fn apply_v003(conn: &Connection, _migration: &Migration) -> Result<()> {
         .await?;
     for col in ["confidence", "supersedes"] {
         let sql = format!("ALTER TABLE memories DROP COLUMN {col}");
-        if let Err(e) = conn.execute(&sql, libsql::params![]).await {
-            if !e.to_string().contains("no such column") {
-                return Err(anyhow::anyhow!("v003 migration: {e}"));
-            }
+        if let Err(e) = conn.execute(&sql, libsql::params![]).await
+            && !e.to_string().contains("no such column")
+        {
+            return Err(anyhow::anyhow!("v003 migration: {e}"));
         }
     }
     Ok(())

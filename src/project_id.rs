@@ -45,12 +45,11 @@ fn git_remote_slug(project_root: &Path) -> Option<String> {
             in_origin = trimmed == r#"[remote "origin"]"#;
             continue;
         }
-        if in_origin {
-            if let Some(rest) = trimmed.strip_prefix("url") {
-                let url = rest.trim_start_matches(|c: char| c == ' ' || c == '=').trim();
-                if !url.is_empty() {
-                    return Some(normalise_remote_url(url));
-                }
+        if in_origin
+            && let Some(rest) = trimmed.strip_prefix("url") {
+            let url = rest.trim_start_matches([' ', '=']).trim();
+            if !url.is_empty() {
+                return Some(normalise_remote_url(url));
             }
         }
     }

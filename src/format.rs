@@ -10,14 +10,13 @@ pub fn compact(
 ) -> String {
     let total = results.len() + omitted;
     let mut header = format!("--- Memory Context ({} results", total);
-    if omitted > 0 {
-        if let Some(path) = omitted_file {
-            header.push_str(&format!(
-                " -- {} included in full in {}",
-                omitted,
-                path.display()
-            ));
-        }
+    if omitted > 0
+        && let Some(path) = omitted_file {
+        header.push_str(&format!(
+            " -- {} included in full in {}",
+            omitted,
+            path.display()
+        ));
     }
     header.push_str(") ---\n");
     let mut out = header;
