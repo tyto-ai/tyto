@@ -154,8 +154,8 @@ pub async fn store_memory(
     .await?;
 
     conn.execute(
-        "INSERT INTO memory_vectors (memory_id, embedding) VALUES (?1, ?2)",
-        params![id.clone(), embedding_blob],
+        "INSERT INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
+        params![id.clone(), embed::model_id(), embedding_blob],
     )
     .await?;
 

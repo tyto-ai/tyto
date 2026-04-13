@@ -235,7 +235,7 @@ async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> R
 async fn copy_vectors(local: &Connection, remote: &Connection) -> Result<usize> {
     let mut rows = local
         .query(
-            "SELECT memory_id, embedding FROM memory_vectors",
+            "SELECT memory_id, embed_model, embedding FROM memory_vectors",
             libsql::params![],
         )
         .await?;
@@ -244,8 +244,8 @@ async fn copy_vectors(local: &Connection, remote: &Connection) -> Result<usize> 
     while let Some(row) = rows.next().await? {
         remote
             .execute(
-                "INSERT OR IGNORE INTO memory_vectors (memory_id, embedding) VALUES (?1, ?2)",
-                libsql::params![row.get_value(0)?, row.get_value(1)?],
+                "INSERT OR IGNORE INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
+                libsql::params![row.get_value(0)?, row.get_value(1)?, row.get_value(2)?],
             )
             .await?;
         count += 1;
