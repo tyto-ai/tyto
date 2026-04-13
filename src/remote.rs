@@ -299,29 +299,16 @@ fn update_config(config: &Config, remote_url: &str) -> Result<()> {
         String::new()
     };
 
-    let mut doc: toml::Value = if existing.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        existing
-            .parse()
-            .with_context(|| format!("Failed to parse {}", config_path.display()))?
-    };
+    // toml_edit edits in-place, preserving user comments and key ordering.
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .with_context(|| format!("Failed to parse {}", config_path.display()))?;
 
-    let table = doc.as_table_mut().context("Config root is not a TOML table")?;
-    let backend = table
-        .entry("backend")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let backend_table = backend.as_table_mut().context("backend is not a TOML table")?;
+    doc["backend"]["mode"] = toml_edit::value("remote");
+    doc["backend"]["remote_mode"] = toml_edit::value("replica");
+    doc["backend"]["remote_url"] = toml_edit::value(remote_url);
 
-    backend_table.insert("mode".to_string(), toml::Value::String("remote".to_string()));
-    backend_table.insert("remote_mode".to_string(), toml::Value::String("replica".to_string()));
-    backend_table.insert(
-        "remote_url".to_string(),
-        toml::Value::String(remote_url.to_string()),
-    );
-
-    let new_text = toml::to_string_pretty(&doc).context("Failed to serialise updated config")?;
-    std::fs::write(&config_path, new_text)
+    std::fs::write(&config_path, doc.to_string())
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
 
     Ok(())
