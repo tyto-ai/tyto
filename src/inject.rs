@@ -21,7 +21,8 @@ They are not interchangeable.\n\
 [memso tools] store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
 search_memory(query,[limit,detail]) | get_memories(ids) | \
 list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
-pin_memories(ids,pin) | delete_memories(ids)\n";
+pin_memories(ids,pin) | delete_memories(ids) | \
+list_stale_memories() | evict_stale_memories()\n";
 
 /// Returns true if `memso serve` is running (whether still initializing or fully ready).
 ///

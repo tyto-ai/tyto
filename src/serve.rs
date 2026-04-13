@@ -440,6 +440,35 @@ impl MemsoServer {
             Err(e) => Err(format!("delete_memories failed: {e}")),
         }
     }
+
+    #[tool(description = "List memories eligible for eviction: not pinned, older than 7 days, retention score below threshold. Call before evict_stale_memories to review candidates.")]
+    async fn list_stale_memories(&self) -> Result<String, String> {
+        let ready = self.try_ready()?;
+        match retrieve::list_stale(&ready.conn, &self.project_id).await {
+            Ok(stale) if stale.is_empty() => Ok("No stale memories found.".to_string()),
+            Ok(stale) => {
+                let mut out = format!("{} stale memories eligible for eviction:\n", stale.len());
+                for m in &stale {
+                    out.push_str(&format!(
+                        "  [{:<16}  {:.2}] score={:.3}  days={:.0}  {}\n    id: {}\n",
+                        m.memory_type, m.importance, m.score, m.days_since_access, m.title, m.id
+                    ));
+                }
+                Ok(out)
+            }
+            Err(e) => Err(format!("list_stale_memories failed: {e}")),
+        }
+    }
+
+    #[tool(description = "Permanently delete all stale memories (not pinned, older than 7 days, retention score below threshold). Call list_stale_memories first to review candidates.")]
+    async fn evict_stale_memories(&self) -> Result<String, String> {
+        let ready = self.try_ready()?;
+        match retrieve::evict_stale(&ready.conn, &self.project_id).await {
+            Ok(0) => Ok("No stale memories to evict.".to_string()),
+            Ok(n) => Ok(format!("Evicted {n} stale memories.")),
+            Err(e) => Err(format!("evict_stale_memories failed: {e}")),
+        }
+    }
 }
 
 #[tool_handler]

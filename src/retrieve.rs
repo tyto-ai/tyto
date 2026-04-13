@@ -458,6 +458,84 @@ fn build_fts_query(query: &str) -> String {
         .join(" ")
 }
 
+const STALE_RETENTION_THRESHOLD: f64 = 0.15;
+const STALE_MIN_AGE_DAYS: f64 = 7.0;
+
+pub struct StaleMemory {
+    pub id: String,
+    pub memory_type: String,
+    pub title: String,
+    pub importance: f64,
+    pub score: f64,
+    pub days_since_access: f64,
+}
+
+/// Return memories eligible for eviction: not pinned, older than STALE_MIN_AGE_DAYS, retention score below threshold.
+pub async fn list_stale(
+    conn: &libsql::Connection,
+    project_id: &str,
+) -> Result<Vec<StaleMemory>> {
+    let now = Utc::now();
+    let cutoff = (now - chrono::Duration::days(STALE_MIN_AGE_DAYS as i64)).to_rfc3339();
+    let mut rows = conn
+        .query(
+            "SELECT id, type, title, importance, access_count, last_accessed, created_at, source
+             FROM memories
+             WHERE project_id = ?1
+               AND status = 'active'
+               AND pinned = 0
+               AND created_at <= ?2",
+            params![project_id.to_string(), cutoff],
+        )
+        .await?;
+
+    let mut stale = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let memory_type: String = row.get(1)?;
+        let importance: f64 = row.get(3)?;
+        let access_count: i64 = row.get(4)?;
+        let last_accessed: Option<String> = row.get(5).ok();
+        let created_at: String = row.get(6)?;
+        let source: String = row.get(7).unwrap_or_else(|_| "realtime".to_string());
+        let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
+        let score = retention_score(&memory_type, importance, days, access_count, &source);
+        if score < STALE_RETENTION_THRESHOLD {
+            stale.push(StaleMemory {
+                id: row.get(0)?,
+                title: row.get(2)?,
+                importance,
+                score,
+                memory_type,
+                days_since_access: days,
+            });
+        }
+    }
+
+    stale.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(stale)
+}
+
+/// Hard-delete all stale memories (those returned by list_stale). Returns count deleted.
+pub async fn evict_stale(
+    conn: &libsql::Connection,
+    project_id: &str,
+) -> Result<u64> {
+    let candidates = list_stale(conn, project_id).await?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<String> = candidates.into_iter().map(|m| m.id).collect();
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    // Prepend project_id param; WHERE clause double-checks project scope for safety.
+    let sql = format!(
+        "DELETE FROM memories WHERE project_id = ?1 AND id IN ({placeholders})"
+    );
+    let params: Vec<libsql::Value> = std::iter::once(libsql::Value::Text(project_id.to_string()))
+        .chain(ids.into_iter().map(libsql::Value::Text))
+        .collect();
+    Ok(conn.execute(&sql, params_from_iter(params)).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
