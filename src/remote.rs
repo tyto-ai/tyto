@@ -184,8 +184,8 @@ async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> R
     let mut rows = local
         .query(
             "SELECT id, project_id, topic_key, type, title, content, facts, tags,
-                    importance, confidence, access_count, last_accessed, pinned, status,
-                    supersedes, session_id, source, created_at, updated_at, content_hash
+                    importance, access_count, last_accessed, pinned, status,
+                    session_id, source, created_at, updated_at, content_hash
              FROM memories",
             libsql::params![],
         )
@@ -197,9 +197,9 @@ async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> R
             .execute(
                 "INSERT OR IGNORE INTO memories
                     (id, project_id, topic_key, type, title, content, facts, tags,
-                     importance, confidence, access_count, last_accessed, pinned, status,
-                     supersedes, session_id, source, created_at, updated_at, content_hash)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                     importance, access_count, last_accessed, pinned, status,
+                     session_id, source, created_at, updated_at, content_hash)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 libsql::params![
                     row.get_value(0)?,
                     row.get_value(1)?,
@@ -218,9 +218,7 @@ async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> R
                     row.get_value(14)?,
                     row.get_value(15)?,
                     row.get_value(16)?,
-                    row.get_value(17)?,
-                    row.get_value(18)?,
-                    row.get_value(19)?
+                    row.get_value(17)?
                 ],
             )
             .await?;

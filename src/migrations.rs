@@ -21,24 +21,22 @@ pub async fn run(conn: &Connection) -> Result<()> {
 
     // v1 -> v2: add embed_model column to memory_vectors.
     // Databases created after this change already have the column (from the base SCHEMA);
-    // the probe SELECT makes the ALTER TABLE idempotent for both old and new databases.
-    // Note: PRAGMA table_info does not work over the Hrana remote protocol (Turso direct
-    // mode), so we use a zero-row SELECT to test column existence instead.
+    // the ADD COLUMN is idempotent via error handling.
+    // Note: PRAGMA table_info and LIMIT 0 SELECT probes are unreliable over Hrana (Turso
+    // direct mode) - LIMIT 0 returns Ok even for nonexistent columns. Attempt the DDL
+    // directly and ignore "duplicate column name" (already exists).
     // Existing rows are backfilled with the current model_id so they are not re-embedded.
     if version < 2 {
-        let has_col = conn
-            .query(
-                "SELECT embed_model FROM memory_vectors LIMIT 0",
-                libsql::params![],
-            )
-            .await
-            .is_ok();
-        if !has_col {
-            conn.execute(
+        if let Err(e) = conn
+            .execute(
                 "ALTER TABLE memory_vectors ADD COLUMN embed_model TEXT NOT NULL DEFAULT ''",
                 libsql::params![],
             )
-            .await?;
+            .await
+        {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(anyhow::anyhow!("v2 migration: {e}"));
+            }
         }
         conn.execute(
             "UPDATE memory_vectors SET embed_model = ?1 WHERE embed_model = ''",
@@ -46,6 +44,29 @@ pub async fn run(conn: &Connection) -> Result<()> {
         )
         .await?;
         set_version(conn, 2).await?;
+    }
+
+    // v2 -> v3: drop unused sessions table and unused columns (confidence, supersedes).
+    // All three were defined in the schema but never read or written by any code path.
+    //
+    // IMPORTANT: Do NOT use LIMIT 0 SELECT probes here. On Turso/Hrana, a zero-row
+    // SELECT returns Ok even for nonexistent columns (column validation is skipped
+    // when no rows are fetched). Instead, attempt the DDL directly and ignore the
+    // specific "no such column" error (idempotent via error handling, not probing).
+    if version < 3 {
+        conn.execute("DROP TABLE IF EXISTS sessions", libsql::params![])
+            .await?;
+
+        for col in ["confidence", "supersedes"] {
+            let sql = format!("ALTER TABLE memories DROP COLUMN {col}");
+            if let Err(e) = conn.execute(&sql, libsql::params![]).await {
+                if !e.to_string().contains("no such column") {
+                    return Err(anyhow::anyhow!("v3 migration: {e}"));
+                }
+            }
+        }
+
+        set_version(conn, 3).await?;
     }
 
     Ok(())
@@ -85,12 +106,10 @@ CREATE TABLE IF NOT EXISTS memories (
     facts         TEXT,
     tags          TEXT,
     importance    REAL    DEFAULT 0.5,
-    confidence    REAL    DEFAULT 1.0,
     access_count  INTEGER DEFAULT 0,
     last_accessed TEXT,
     pinned        INTEGER DEFAULT 0,
     status        TEXT    DEFAULT 'active',
-    supersedes    TEXT,
     session_id    TEXT,
     source        TEXT    NOT NULL DEFAULT 'realtime',
     created_at    TEXT    NOT NULL,
@@ -107,15 +126,6 @@ CREATE INDEX IF NOT EXISTS memories_project_status
 
 CREATE INDEX IF NOT EXISTS memories_content_hash
     ON memories (content_hash, session_id);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    ended_at   TEXT,
-    status     TEXT DEFAULT 'active',
-    agent      TEXT
-);
 
 CREATE TABLE IF NOT EXISTS memory_vectors (
     memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -162,8 +172,3 @@ CREATE TABLE IF NOT EXISTS raw_captures (
 CREATE INDEX IF NOT EXISTS raw_captures_pending
     ON raw_captures (project_id, presented_at);
 ";
-
-// Note: the `sessions` table, and the `confidence` and `supersedes` columns on
-// `memories`, are defined in the schema but not yet used by any code path.
-// They are reserved for post-v1 features (session tracking, supersedes chaining).
-// Do not remove them from the schema without a versioned migration.
