@@ -101,7 +101,7 @@ impl Config {
     /// Expand shell-style `$VAR`, `${VAR}`, and `${VAR:-default}` references
     /// inside string config values. Useful when a value is stored in the config
     /// file as e.g. `auth_token = "$MY_TOKEN"` to avoid hardcoding secrets.
-    /// Direct env var overrides via `MEMSO_BACKEND_AUTH_TOKEN` are preferred.
+    /// Direct env var overrides via `MEMSO_BACKEND__AUTH_TOKEN` are preferred.
     fn expand_string_vars(&mut self) {
         self.expand_string_vars_with(|k| env::var(k).ok());
     }

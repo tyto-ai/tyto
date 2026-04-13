@@ -71,7 +71,7 @@ pub async fn enable(
     println!("      Local backup retained at {}", local_path.display());
 
     println!();
-    println!("Done. Set MEMSO_REMOTE_AUTH_TOKEN in your environment and restart Claude Code.");
+    println!("Done. Set MEMSO_BACKEND__AUTH_TOKEN in your environment and restart Claude Code.");
 
     Ok(())
 }
@@ -103,7 +103,7 @@ pub async fn sync(config: &Config, force: bool) -> Result<String> {
         .backend
         .auth_token
         .as_deref()
-        .context("remote replica mode requires backend.auth_token (set MEMSO_REMOTE_AUTH_TOKEN)")?;
+        .context("remote replica mode requires backend.auth_token (set MEMSO_BACKEND__AUTH_TOKEN)")?;
 
     let local_path = config.local_db_path();
     if !local_path.exists() {

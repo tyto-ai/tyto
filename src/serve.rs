@@ -264,7 +264,7 @@ impl MemsoServer {
             format!(
                 "Please run `{cmd}` to enable remote sync for memso. \
                  You will need --url <url> and --token <token> (get these from the Turso dashboard or `turso db show` / `turso db tokens create`). \
-                 Set MEMSO_REMOTE_AUTH_TOKEN in your environment and restart Claude Code when done."
+                 Set MEMSO_BACKEND__AUTH_TOKEN in your environment and restart Claude Code when done."
             ),
         )]
     }
