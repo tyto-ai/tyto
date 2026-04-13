@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use crate::mlog;
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::{tool::ToolRouter, prompt::PromptRouter}, wrapper::Parameters},
@@ -570,12 +571,28 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
 }
 
 pub async fn run(config: Config) -> Result<()> {
+    // Init file logger first — all subsequent mlog! calls mirror to this file.
+    // Location: .memso/memso-serve.log next to crash.log and the database.
+    let log_path = config.db_path()
+        .parent()
+        .map(|p| p.join("memso-serve.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("memso-serve.log"));
+    crate::log::init(&log_path);
+
+    mlog!("=== memso serve starting ===");
+    mlog!("version: {}", env!("CARGO_PKG_VERSION"));
+    mlog!("platform: {}/{}", std::env::consts::OS, std::env::consts::ARCH);
+    mlog!("log file: {}", log_path.display());
+    if let Ok(cwd) = std::env::current_dir() {
+        mlog!("cwd: {}", cwd.display());
+    }
+    mlog!("project root: {}", config.project_root.display());
+    mlog!("backend: {:?}", config.backend);
+
     let pid = project_id::resolve(&config.project_root, config.memory.project_id.as_deref());
 
-    // Set up crash log path and panic hook before any fallible work.
-    // Any error (panic or otherwise) that occurs after this point is written to
-    // crash.log, which `memso inject` reads on the next session start and surfaces
-    // to the AI as a warning.
+    // Set up crash log and panic hook before any fallible work.
+    // crash.log is read by `memso inject` on next session start and surfaced to the AI.
     let crash_log = config.db_path()
         .parent()
         .map(|p| p.join("crash.log"))
@@ -586,15 +603,15 @@ pub async fn run(config: Config) -> Result<()> {
     let _ = std::fs::remove_file(&crash_log); // clear stale crash from previous run
     let crash_log_hook = crash_log.clone();
     std::panic::set_hook(Box::new(move |info| {
+        mlog!("PANIC: {info}");
         let msg = format!("[{}] PANIC: {info}\n", chrono::Utc::now().format("%H:%M:%S"));
-        eprintln!("{}", msg.trim());
         let _ = std::fs::write(&crash_log_hook, &msg);
     }));
 
     let result = serve_inner(config, pid).await;
     if let Err(ref e) = result {
+        mlog!("ERROR: {e:#}");
         let msg = format!("[{}] ERROR: {e:#}\n", chrono::Utc::now().format("%H:%M:%S"));
-        eprintln!("{}", msg.trim());
         // Append rather than overwrite: the panic hook may have already written to
         // crash.log and we don't want to erase it.
         use std::io::Write as _;
@@ -603,6 +620,7 @@ pub async fn run(config: Config) -> Result<()> {
             .open(&crash_log)
             .and_then(|mut f| writeln!(f, "{}", msg.trim()));
     }
+    mlog!("=== memso serve exiting ===");
     result
 }
 
@@ -627,7 +645,7 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     // Keep lock_file alive (lock held) until end of function.
 
     let session_id = Uuid::new_v4().to_string();
-    eprintln!("memso: session {session_id}, project \"{project_id}\"");
+    mlog!("memso: session {session_id}, project \"{project_id}\"");
 
     let server = MemsoServer {
         db: db_rx,
@@ -642,7 +660,7 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     // Start MCP transport immediately — Claude Code sees us as connected right away.
     // Tool calls during the sync window return a "syncing" message instead of blocking.
     let service = server.serve(stdio()).await?;
-    eprintln!("memso: ready (syncing database in background)");
+    mlog!("memso: ready (syncing database in background)");
 
     // Spawn background task: open DB, run migrations, load embedder.
     let ready_file_bg = ready_file.clone();
@@ -651,10 +669,10 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
             Ok(ready) => {
                 let _ = db_tx.send(DbState::Ready(Arc::new(ready)));
                 let _ = std::fs::write(&ready_file_bg, "");
-                eprintln!("memso: database ready");
+                mlog!("memso: database ready");
             }
             Err(e) => {
-                eprintln!("memso: database init failed: {e:#}");
+                mlog!("memso: database init failed: {e:#}");
                 let _ = db_tx.send(DbState::Failed(format!("{e:#}")));
             }
         }
@@ -665,7 +683,7 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     let serve_result: Result<()> = tokio::select! {
         result = service.waiting() => result.map(|_| ()).map_err(Into::into),
         _ = shutdown_signal() => {
-            eprintln!("memso: shutting down");
+            mlog!("memso: shutting down");
             Ok(())
         }
         _ = wait_db_failed(&mut db_rx_monitor) => {
@@ -711,14 +729,14 @@ async fn wait_db_failed(rx: &mut tokio::sync::watch::Receiver<DbState>) {
 }
 
 async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
-    eprintln!("memso: opening database...");
+    mlog!("memso: opening database...");
     let db = Db::open(config).await?;
     let conn = Arc::new(db.conn);
 
-    eprintln!("memso: running migrations...");
+    mlog!("memso: running migrations...");
     migrations::run(&conn).await?;
 
-    eprintln!("memso: loading embedding model (first run will download ~22MB)...");
+    mlog!("memso: loading embedding model (first run will download ~22MB)...");
     let embedder = Arc::new(Mutex::new(Embedder::load()?));
 
     // Re-embed any memories whose vectors were generated by a different model.

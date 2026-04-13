@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use libsql::{Builder, Connection, Database};
 use std::path::Path;
 
-use crate::config::{BackendMode, RemoteMode, Config};
+use crate::{config::{BackendMode, RemoteMode, Config}, mlog};
 
 pub struct Db {
     pub conn: Connection,
@@ -130,9 +130,7 @@ async fn open_replica_with_recovery(
             // Replica files (`memory.replica.db`) are distinct from local-mode files
             // (`memory.db`), so purging is always safe - there is no risk of deleting
             // the user's local database. The remote is the source of truth.
-            eprintln!(
-                "memso: replica open failed ({first_err:#}), purging local files and retrying..."
-            );
+            mlog!("memso: replica open failed ({first_err:#}), purging local files and retrying...");
             purge_replica_files(path)?;
             build()
                 .await
