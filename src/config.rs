@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use shellexpand;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,7 @@ pub struct BackendConfig {
     pub remote_mode: RemoteMode,
     pub local_path: Option<String>,
     pub remote_url: Option<String>,
-    /// Supports "${ENV_VAR}" substitution
+    /// Supports $VAR, ${VAR}, and ${VAR:-default} substitution
     pub auth_token: Option<String>,
 }
 
@@ -84,19 +85,33 @@ impl Config {
         Ok(Config::default())
     }
 
-    /// Resolve auth_token: expand "${VAR}" syntax, then fall back to MEMSO_REMOTE_AUTH_TOKEN env var.
+    /// Expand shell-style env vars in string config fields, then fall back to
+    /// MEMSO_REMOTE_AUTH_TOKEN for auth_token if still unset.
     fn resolve_env_vars(&mut self) {
         self.resolve_env_vars_with(|k| env::var(k).ok());
     }
 
-    fn resolve_env_vars_with(&mut self, env: impl Fn(&str) -> Option<String>) {
-        if let Some(token) = &self.backend.auth_token
-            && let Some(var) = token.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
-        {
-            self.backend.auth_token = env(var);
+    fn resolve_env_vars_with(&mut self, env_fn: impl Fn(&str) -> Option<String>) {
+        // Expand $VAR, ${VAR}, and ${VAR:-default} in string config fields.
+        // When a referenced variable is undefined and no default is given, the field
+        // becomes None so callers get a clean "not configured" state rather than a
+        // literal "$VARNAME" string being used as a token or URL.
+        let expand = |s: &str| -> Option<String> {
+            shellexpand::env_with_context(s, |var| {
+                env_fn(var).ok_or(()).map(Some)
+            })
+            .ok()
+            .map(|cow| cow.into_owned())
+        };
+
+        if let Some(token) = self.backend.auth_token.clone() {
+            self.backend.auth_token = expand(&token);
+        }
+        if let Some(url) = self.backend.remote_url.clone() {
+            self.backend.remote_url = expand(&url);
         }
         if self.backend.auth_token.is_none() {
-            self.backend.auth_token = env("MEMSO_REMOTE_AUTH_TOKEN");
+            self.backend.auth_token = env_fn("MEMSO_REMOTE_AUTH_TOKEN");
         }
     }
 

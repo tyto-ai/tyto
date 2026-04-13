@@ -1,21 +1,63 @@
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 /// Each entry is (pattern, replacement). The replacement may use `$1`, `$2`, etc.
 /// to preserve surrounding context while redacting only the sensitive value.
-static PATTERNS: Lazy<Vec<(Regex, &str)>> = Lazy::new(|| {
+///
+/// Patterns are sourced from the gitleaks default ruleset and supplemented with
+/// common token formats. Update this list when adding integrations with new providers.
+static PATTERNS: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
     vec![
-        // OpenAI / Anthropic / generic sk- tokens
-        (Regex::new(r"sk-[A-Za-z0-9_\-]{10,}").unwrap(), "[REDACTED]"),
-        // GitHub tokens
-        (Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap(), "[REDACTED]"),
-        (Regex::new(r"github_pat_[A-Za-z0-9_]{82}").unwrap(), "[REDACTED]"),
+        // PEM private key blocks (matched first - high specificity, multi-line)
+        (Regex::new(r"-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----").unwrap(), "[REDACTED]"),
+
         // JWTs (three base64url segments separated by dots)
         (Regex::new(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+").unwrap(), "[REDACTED]"),
-        // PEM private key blocks
-        (Regex::new(r"-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----").unwrap(), "[REDACTED]"),
+
+        // AWS access key IDs
+        (Regex::new(r"(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}").unwrap(), "[REDACTED]"),
+
+        // OpenAI / Anthropic / generic sk- tokens
+        (Regex::new(r"sk-[A-Za-z0-9_\-]{10,}").unwrap(), "[REDACTED]"),
+
+        // Stripe secret and restricted keys
+        (Regex::new(r"(sk|rk)_(live|test)_[0-9a-zA-Z]{24,}").unwrap(), "[REDACTED]"),
+
+        // GitHub tokens
+        (Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap(), "[REDACTED]"),
+        (Regex::new(r"gho_[A-Za-z0-9]{36}").unwrap(), "[REDACTED]"),
+        (Regex::new(r"ghu_[A-Za-z0-9]{36}").unwrap(), "[REDACTED]"),
+        (Regex::new(r"ghs_[A-Za-z0-9]{36}").unwrap(), "[REDACTED]"),
+        (Regex::new(r"github_pat_[A-Za-z0-9_]{82}").unwrap(), "[REDACTED]"),
+
+        // Slack tokens
+        (Regex::new(r"xox[baprs]-[A-Za-z0-9\-]{10,}").unwrap(), "[REDACTED]"),
+
+        // Google API keys
+        (Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(), "[REDACTED]"),
+
+        // Google OAuth client secrets
+        (Regex::new(r"GOCSPX-[A-Za-z0-9\-_]{28}").unwrap(), "[REDACTED]"),
+
+        // Cloudflare API tokens (40 hex chars)
+        (Regex::new(r#"(?i)cloudflare.{0,20}['"][0-9a-f]{40}['"]"#).unwrap(), "[REDACTED]"),
+
+        // npm tokens
+        (Regex::new(r"npm_[A-Za-z0-9]{36}").unwrap(), "[REDACTED]"),
+
+        // Heroku API keys (UUID-like)
+        (Regex::new(r"(?i)heroku.{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap(), "[REDACTED]"),
+
+        // Twilio account SID and auth token
+        (Regex::new(r"AC[a-z0-9]{32}").unwrap(), "[REDACTED]"),
+        (Regex::new(r"SK[a-z0-9]{32}").unwrap(), "[REDACTED]"),
+
+        // SendGrid API keys
+        (Regex::new(r"SG\.[A-Za-z0-9\-_]{22}\.[A-Za-z0-9\-_]{43}").unwrap(), "[REDACTED]"),
+
         // Environment variable assignments with token-like values (20+ chars, no spaces).
-        // Group 1 captures the key+assignment so it is preserved in output.
+        // Matched last as a catch-all. Group 1 preserves the key name.
         (
             Regex::new(r#"(?i)((?:token|secret|password|key|auth|api_key)\s*=\s*['"]?)[A-Za-z0-9_\-\.]{20,}['"]?"#).unwrap(),
             "${1}[REDACTED]",
