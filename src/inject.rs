@@ -91,27 +91,26 @@ async fn run_inner(
     let cwd = env::current_dir()?;
     let config = Config::load(&cwd)?;
 
-    // If project_id is still unresolved after full config load (ancestor config exists
-    // but lacks project_id), prompt the AI to surface this to the user.
-    // Only on session/compact types to avoid noise on every prompt.
-    if config.memory.project_id.is_none() && (inject_type == "session" || inject_type == "compact") {
-        let suggested = crate::project_id::infer(&config.project_root);
-        let config_path = config.source_path
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| ".memso.toml".to_string());
-        println!(
-            "[memso] ACTION REQUIRED: No `memory.project_id` is set in `{config_path}`. \
-             Without this, memories may be loaded under a different ID if the project \
-             directory is renamed or the git remote changes, which will cause sessions \
-             to lose access to existing memories.\n\
-             Inform the user of this and offer to add it. Suggested value based on this \
-             project:\n\n\
-             ```toml\n\
-             [memory]\n\
-             project_id = \"{suggested}\"\n\
-             ```\n"
-        );
+    // No project_id means no config or config without project_id. Skip all DB work
+    // so no .memso directory is created. On session/compact types, emit a message so
+    // the AI can surface the setup instructions to the user.
+    if config.memory.project_id.is_none() {
+        if inject_type == "session" || inject_type == "compact" {
+            let suggested = crate::project_id::infer(&config.project_root);
+            println!(
+                "[memso] memso has loaded, but there is no `.memso.toml` configuration \
+                 file for this project, so memories will not be stored or retrieved this \
+                 session.\n\
+                 Inform the user of this. Offer to set up memso by creating a \
+                 `.memso.toml` file. Suggested configuration:\n\n\
+                 ```toml\n\
+                 [memory]\n\
+                 project_id = \"{suggested}\"\n\
+                 ```\n\
+                 Ask the user whether to use this value or a different project_id."
+            );
+        }
+        return Ok(());
     }
 
     // Check for a crash log written by a previous `memso serve` session.
