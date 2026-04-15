@@ -19,7 +19,7 @@
 #   The binary is re-downloaded only when the remote SHA changes.
 set -uo pipefail
 
-MEMSO_VERSION="0.2.0"
+MEMSO_VERSION="0.3.2"
 PLUGIN_VERSION="1"
 COMPOSITE="${MEMSO_VERSION}-${PLUGIN_VERSION}"
 
@@ -27,6 +27,14 @@ BINARY="${CLAUDE_PLUGIN_DATA}/memso"
 VERSION_FILE="${CLAUDE_PLUGIN_DATA}/version"
 REPO="beefsack/memso"
 CHANNEL="${MEMSO_CHANNEL:-stable}"
+
+# Allow overriding the GitHub releases base URL - used in E2E tests to point at a
+# local mock HTTP server instead of hitting GitHub. Stable channel builds URLs as:
+#   ${RELEASES_BASE}/v${MEMSO_VERSION}/${ARTIFACT}
+# Dev channel builds:
+#   ${RELEASES_BASE}/dev/dev-version.txt
+#   ${RELEASES_BASE}/dev/${ARTIFACT}
+RELEASES_BASE="${MEMSO_RELEASES_BASE:-https://github.com/${REPO}/releases/download}"
 
 # ---------------------------------------------------------------------------
 # File logging - mirrors all output to a persistent log for troubleshooting.
@@ -101,7 +109,7 @@ esac
 # Channel-specific freshness check.
 # ---------------------------------------------------------------------------
 if [[ "${CHANNEL}" == "dev" ]]; then
-  DEV_BASE_URL="https://github.com/${REPO}/releases/download/dev"
+  DEV_BASE_URL="${RELEASES_BASE}/dev"
 
   REMOTE_SHA="$(curl -fsSL "${DEV_BASE_URL}/dev-version.txt" 2>/dev/null || true)"
   if [[ -z "${REMOTE_SHA}" ]]; then
@@ -139,7 +147,7 @@ else
     fi
   fi
 
-  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${MEMSO_VERSION}/${ARTIFACT}"
+  DOWNLOAD_URL="${RELEASES_BASE}/v${MEMSO_VERSION}/${ARTIFACT}"
   VERSION_TO_WRITE="${COMPOSITE}"
   VERSION_LABEL="v${COMPOSITE}"
 fi
@@ -183,3 +191,4 @@ printf '%s' "${VERSION_TO_WRITE}" > "${VERSION_FILE}"
 
 log_err "[memso] Installed ${VERSION_LABEL} to ${BINARY}"
 log "[memso bootstrap] Downloaded and installed ${VERSION_LABEL} (${OS}/${ARCH})"
+log "[memso bootstrap] First-run note: memso will download a ~22MB embedding model on first use. Memory tools will be unavailable for up to ~1 minute while the model loads. The agent will inform you when this is happening."

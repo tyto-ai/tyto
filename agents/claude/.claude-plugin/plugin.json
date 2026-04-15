@@ -1,6 +1,6 @@
 {
   "name": "memso",
-  "version": "0.2.0-1",
+  "version": "0.3.2-1",
   "description": "Persistent memory for AI agents - stores decisions, discoveries, and gotchas across sessions using local libSQL with vector + BM25 search.",
   "author": {
     "name": "Michael Alexander",
