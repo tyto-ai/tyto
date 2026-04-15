@@ -1,0 +1,148 @@
+name: E2E
+
+# Verifies the full cold-start install path on every target platform:
+#   1. Build release binary and package as artifact
+#   2. Serve artifact from a local HTTP server (no GitHub dependency)
+#   3. Run bootstrap.sh cold install - binary absent, version file absent
+#   4. Run bootstrap.sh again - must fast-path (idempotency check)
+#   5. `memso status` smoke test - confirms DB opens and migrations run
+#   6. MCP store + search E2E - confirms full read/write pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    name: E2E (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: memso-linux-x86_64.tar.gz
+            binary: memso
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: memso-linux-aarch64.tar.gz
+            binary: memso
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: memso-macos-aarch64.tar.gz
+            binary: memso
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: memso-windows-x86_64.zip
+            binary: memso.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: tar czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release ${{ matrix.binary }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target\${{ matrix.target }}\release\memso.exe -DestinationPath ${{ matrix.artifact }}
+
+      # Create a directory tree that mirrors the GitHub Releases URL pattern so
+      # bootstrap.sh with MEMSO_RELEASES_BASE=http://localhost:8787 can fetch it.
+      # Stable URL shape: /v{VERSION}/{artifact}
+      - name: Set up local release server
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= "\(.*\)"/\1/')
+          echo "MEMSO_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          mkdir -p mock-releases/v${VERSION}
+          cp "${{ matrix.artifact }}" mock-releases/v${VERSION}/
+          python3 -m http.server 8787 --directory mock-releases &
+          SERVER_PID=$!
+          echo "HTTP_SERVER_PID=${SERVER_PID}" >> "$GITHUB_ENV"
+          # Wait until the server is accepting connections
+          for i in $(seq 1 10); do
+            curl -sf http://localhost:8787/ > /dev/null 2>&1 && break
+            sleep 0.5
+          done
+
+      # --- bootstrap tests ---
+
+      - name: Bootstrap - cold start
+        shell: bash
+        env:
+          CLAUDE_PLUGIN_DATA: ${{ runner.temp }}/plugin-data
+          CLAUDE_PLUGIN_ROOT: ${{ github.workspace }}/agents/claude
+          MEMSO_RELEASES_BASE: http://localhost:8787
+        run: |
+          mkdir -p "$CLAUDE_PLUGIN_DATA"
+          bash agents/claude/scripts/bootstrap.sh
+          # Verify binary was installed
+          test -f "$CLAUDE_PLUGIN_DATA/${{ matrix.binary }}" || {
+            echo "Binary not found after cold install"
+            echo "--- bootstrap.log ---"
+            cat "$CLAUDE_PLUGIN_DATA/bootstrap.log" 2>/dev/null || echo "(no log)"
+            exit 1
+          }
+          echo "version: $(cat "$CLAUDE_PLUGIN_DATA/version")"
+          echo "--- bootstrap.log ---"
+          cat "$CLAUDE_PLUGIN_DATA/bootstrap.log"
+
+      - name: Bootstrap - idempotent (must fast-path, no re-download)
+        shell: bash
+        env:
+          CLAUDE_PLUGIN_DATA: ${{ runner.temp }}/plugin-data
+          CLAUDE_PLUGIN_ROOT: ${{ github.workspace }}/agents/claude
+          MEMSO_RELEASES_BASE: http://localhost:8787
+        run: |
+          out=$(bash agents/claude/scripts/bootstrap.sh 2>&1)
+          echo "${out}"
+          echo "${out}" | grep -q "Binary ready" || {
+            echo "Expected 'Binary ready' fast-path on second run - got above output"
+            exit 1
+          }
+
+      # --- binary smoke tests ---
+
+      - name: Binary - version
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/plugin-data/${{ matrix.binary }}" --version
+
+      - name: Binary - status (DB open, migrations, query)
+        shell: bash
+        run: |
+          SMOKE_DIR="$RUNNER_TEMP/smoke"
+          mkdir -p "$SMOKE_DIR"
+          printf '[memory]\nproject_id = "e2e-smoke"\n' > "$SMOKE_DIR/.memso.toml"
+          cd "$SMOKE_DIR"
+          "$RUNNER_TEMP/plugin-data/${{ matrix.binary }}" status
+
+      # Deterministic inject state tests — manipulate serve.lock / serve.ready
+      # directly instead of racing against the model download window.
+      # Loading state test uses fcntl (Unix only); ready state test is cross-platform.
+      - name: Inject - loading and ready state messages
+        shell: bash
+        run: |
+          python3 scripts/test_inject_states.py "$RUNNER_TEMP/plugin-data/${{ matrix.binary }}"
+
+      - name: Binary - MCP store + search
+        shell: bash
+        run: |
+          python3 scripts/e2e_mcp.py "$RUNNER_TEMP/plugin-data/${{ matrix.binary }}"
