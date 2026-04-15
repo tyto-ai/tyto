@@ -27,11 +27,11 @@ impl Embedder {
         // MEMSO_FORCE_MODEL_REFRESH=1: delete the model cache before loading so
         // fastembed re-downloads a fresh copy. Useful for troubleshooting a
         // corrupted model or testing the cold-start download path locally.
-        if std::env::var("MEMSO_FORCE_MODEL_REFRESH").as_deref() == Ok("1") {
-            if cache_dir.exists() {
-                std::fs::remove_dir_all(&cache_dir)
-                    .context("MEMSO_FORCE_MODEL_REFRESH: failed to remove model cache")?;
-            }
+        if std::env::var("MEMSO_FORCE_MODEL_REFRESH").as_deref() == Ok("1")
+            && cache_dir.exists()
+        {
+            std::fs::remove_dir_all(&cache_dir)
+                .context("MEMSO_FORCE_MODEL_REFRESH: failed to remove model cache")?;
         }
 
         let model = TextEmbedding::try_new(
