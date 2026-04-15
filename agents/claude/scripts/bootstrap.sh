@@ -75,6 +75,11 @@ if [[ -n "${MEMSO_BINARY_OVERRIDE:-}" ]]; then
   exit 0
 fi
 
+# Force re-download regardless of installed version.
+# Set MEMSO_FORCE_UPDATE=1 to bypass the version check and always download.
+# Useful for troubleshooting stuck or corrupted installs.
+FORCE_UPDATE="${MEMSO_FORCE_UPDATE:-0}"
+
 # Detect OS and architecture.
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -119,7 +124,7 @@ if [[ "${CHANNEL}" == "dev" ]]; then
   fi
 
   LOCAL_SHA="$(cat "${VERSION_FILE}" 2>/dev/null || echo "")"
-  if [[ "${REMOTE_SHA}" == "${LOCAL_SHA}" && -f "${BINARY}" ]]; then
+  if [[ "${FORCE_UPDATE}" != "1" && "${REMOTE_SHA}" == "${LOCAL_SHA}" && -f "${BINARY}" ]]; then
     log "[memso bootstrap] Binary ready (dev ${REMOTE_SHA:0:7})"
     exit 0
   fi
@@ -130,7 +135,7 @@ if [[ "${CHANNEL}" == "dev" ]]; then
 
 else
   # Stable channel.
-  if [[ -f "${VERSION_FILE}" ]]; then
+  if [[ "${FORCE_UPDATE}" != "1" && -f "${VERSION_FILE}" ]]; then
     installed="$(cat "${VERSION_FILE}")"
 
     if [[ "${installed}" == "${COMPOSITE}" ]]; then
