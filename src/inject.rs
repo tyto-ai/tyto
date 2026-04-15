@@ -22,31 +22,54 @@ They are not interchangeable.\n\
 search_memory(query,[limit,detail]) | get_memories(ids) | \
 list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
 pin_memories(ids,pin) | delete_memories(ids) | \
-list_stale_memories() | evict_stale_memories()\n";
+list_stale_memories() | evict_stale_memories() | session_context()\n";
 
-/// Returns true if `memso serve` is running (whether still initializing or fully ready).
-///
-/// Fast path: serve.ready exists -> serve is up, return true immediately.
-/// Slow path: try a non-blocking exclusive lock on `serve.lock`. The OS holds
-/// that lock for `serve`'s entire lifetime and releases it automatically on any
-/// exit — there are no stale files to worry about.
-fn is_serve_running(config: &Config) -> bool {
-    use fs4::fs_std::FileExt;
+/// The three observable states of `memso serve` from inject's perspective.
+enum ServeState {
+    /// No serve process is running. inject should open the DB directly.
+    NotRunning,
+    /// serve.lock is held but serve.ready does not yet exist.
+    /// The server is still initialising (DB open, migrations, model download).
+    /// MCP tools will return a "syncing" error until this transitions to Ready.
+    Loading,
+    /// serve.ready exists. The DB and embedder are up and all tools work.
+    Ready,
+}
+
+/// Detect the current serve state via serve.ready (fast) and serve.lock (slow).
+/// The OS releases serve.lock automatically on any exit, so there are no stale files.
+fn serve_state(config: &Config) -> ServeState {
     if config.serve_ready_path().exists() {
-        return true; // serve is fully up
+        return ServeState::Ready;
     }
+    use fs4::fs_std::FileExt;
     let lock_path = config.serve_lock_path();
     let Ok(file) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&lock_path) else {
-        return false;
+        return ServeState::NotRunning;
     };
-    // try_lock_exclusive returns Ok(true) if we got the lock (no server running),
-    // Ok(false) if another process holds it (server is running, still initializing).
+    // Ok(true)  = we acquired the lock -> nothing is running
+    // Ok(false) = another process holds it -> serve is loading
     match file.try_lock_exclusive() {
-        Ok(true) => { let _ = file.unlock(); false }
-        Ok(false) => true,
-        Err(_) => false,
+        Ok(true) => { let _ = file.unlock(); ServeState::NotRunning }
+        Ok(false) => ServeState::Loading,
+        Err(_) => ServeState::NotRunning,
     }
 }
+
+/// Emitted to the agent when serve is still loading (first-run model download).
+/// UX requirement: always tell the user what is happening, why, and how long.
+const LOADING_MESSAGE: &str =
+    "[memso] The memory server is still starting up.\n\
+     On first install, memso downloads a ~22MB embedding model — this takes up to a minute.\n\
+     Memory tools (search_memory, store_memories, etc.) will return a 'loading' message \
+     until startup is complete.\n\n\
+     Do the following right now, before responding to the user's request:\n\
+     1. Inform the user: \"memso is loading its embedding model (first-run setup, ~1 minute). \
+        Memory context is not available yet.\"\n\
+     2. Continue with the user's request as normal — do not block on memso.\n\
+     3. Once memso has finished loading, call the session_context tool to load memory \
+        context for this session. If session_context returns a 'loading' message, \
+        wait a few seconds and retry.";
 
 fn build_session_instructions(session_path: Option<&std::path::Path>) -> String {
     match session_path {
@@ -127,17 +150,33 @@ async fn run_inner(
         );
     }
 
-    // If `memso serve` is running (initializing or ready), skip Db::open to avoid
-    // racing on the DB file. Not applicable for remote mode: Turso handles concurrent
-    // connections safely and there is no local file to contend on.
-    if !matches!(config.backend.mode, BackendMode::Remote) && is_serve_running(&config) {
-        if inject_type == "session" || inject_type == "compact" {
-            println!(
-                "{INSTRUCTIONS}[memso] MCP server is running — memory context is available via tools. \
-                 Use search_memory / list_memories for context retrieval this session."
-            );
+    // If `memso serve` is running, skip Db::open to avoid racing on the DB file.
+    // Not applicable for remote mode: Turso handles concurrent connections safely.
+    // We distinguish Ready (tools work) from Loading (tools return "syncing") so we
+    // can give the user accurate information about what is happening and what to expect.
+    if !matches!(config.backend.mode, BackendMode::Remote) {
+        match serve_state(&config) {
+            ServeState::Ready => {
+                if inject_type == "session" || inject_type == "compact" {
+                    println!(
+                        "{INSTRUCTIONS}[memso] MCP server is running — memory context is available via tools. \
+                         Use search_memory / list_memories for context retrieval this session."
+                    );
+                }
+                return Ok(());
+            }
+            ServeState::Loading => {
+                // Only session/compact hooks tell the agent about the loading state.
+                // Prompt hooks emit nothing — the agent already has instructions from
+                // the MCP server and there is no memory context to inject yet.
+                // Stop hooks emit nothing — there is nothing to checkpoint during loading.
+                if inject_type == "session" || inject_type == "compact" {
+                    println!("{LOADING_MESSAGE}");
+                }
+                return Ok(());
+            }
+            ServeState::NotRunning => {} // fall through to direct DB access
         }
-        return Ok(());
     }
 
     let db = Db::open(&config).await?;
@@ -450,6 +489,61 @@ fn format_full_memory(mem: &retrieve::FullMemory) -> String {
     }
     out.push_str("---\n");
     out
+}
+
+/// Build session context content for the `session_context` MCP tool.
+///
+/// Returns the same captures + memories that the SessionStart hook would inject,
+/// but as a single String suitable for returning directly from a tool call.
+/// Also marks any pending captures as presented.
+///
+/// Called by `serve::session_context` tool — this is the recovery path when
+/// `memso serve` was still loading at session start.
+pub async fn build_tool_session_content(
+    conn: &libsql::Connection,
+    project_id: &str,
+) -> Result<String> {
+    let captures = query_pending_captures(conn, project_id).await?;
+    let results = retrieve::list(conn, project_id, None, &[], 500, 0.4).await?;
+
+    let mut memories_content = String::new();
+    let mut included = 0usize;
+    if !results.is_empty() {
+        let mut accumulated = 0usize;
+        let full_ids: Vec<String> = results
+            .iter()
+            .take_while(|r| {
+                if accumulated >= FULL_CONTENT_BUDGET {
+                    return false;
+                }
+                accumulated += r.content_len;
+                true
+            })
+            .map(|r| r.id.clone())
+            .collect();
+        included = full_ids.len();
+        if !full_ids.is_empty() {
+            let full_memories = retrieve::get_full_batch(conn, &full_ids, project_id).await?;
+            let full_map: std::collections::HashMap<String, retrieve::FullMemory> =
+                full_memories.into_iter().map(|m| (m.id.clone(), m)).collect();
+            for compact in results.iter().take(included) {
+                if let Some(mem) = full_map.get(&compact.id) {
+                    memories_content.push_str(&format_full_memory(mem));
+                }
+            }
+        }
+    }
+
+    if !captures.is_empty() {
+        mark_captures_presented(conn, project_id).await?;
+    }
+
+    let mut out = format_session_file(&captures, &memories_content);
+    // Append compact index for memories that didn't fit in the full-content budget.
+    if included < results.len() {
+        out.push_str(&crate::format::compact(&results[included..], included, None));
+    }
+    Ok(out)
 }
 
 fn print_within_budget(output: &str, budget: usize) {

@@ -463,6 +463,17 @@ impl MemsoServer {
         }
     }
 
+    #[tool(description = "Load session memory context: pending review captures and top memories for this project. \
+        Call this at session start if memso was still loading when the session began (embedding model download on first install). \
+        Returns a 'loading' message if the database is not yet ready — wait a few seconds and retry. \
+        Marks pending captures as presented.")]
+    async fn session_context(&self) -> Result<String, String> {
+        let ready = self.try_ready()?;
+        crate::inject::build_tool_session_content(&ready.conn, &self.project_id)
+            .await
+            .map_err(|e| format!("session_context failed: {e}"))
+    }
+
     #[tool(description = "Permanently delete all stale memories (not pinned, older than 7 days, retention score below threshold). Call list_stale_memories first to review candidates.")]
     async fn evict_stale_memories(&self) -> Result<String, String> {
         let ready = self.try_ready()?;
@@ -497,7 +508,7 @@ impl ServerHandler for MemsoServer {
                  Tools: store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
                  search_memory(query,[limit,detail]) | get_memories(ids) | \
                  list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
-                 pin_memories(ids,pin) | delete_memories(ids) | remote_sync()",
+                 pin_memories(ids,pin) | delete_memories(ids) | remote_sync() | session_context()",
             )
     }
 }
