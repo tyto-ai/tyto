@@ -328,3 +328,78 @@ pub(crate) fn glob_match(pattern: &str, path: &str) -> bool {
     // Exact match
     path == pattern
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{glob_match, is_excluded};
+    use std::path::Path;
+
+    // --- is_excluded ---
+
+    #[test]
+    fn excluded_builtin_dirs() {
+        assert!(is_excluded(Path::new("target/release/tyto")));
+        assert!(is_excluded(Path::new("node_modules/react/index.js")));
+        assert!(is_excluded(Path::new(".git/objects/pack/foo")));
+        assert!(is_excluded(Path::new("__pycache__/foo.pyc")));
+        assert!(is_excluded(Path::new(".venv/lib/site-packages/foo.py")));
+        assert!(is_excluded(Path::new("vendor/github.com/foo/bar.go")));
+    }
+
+    #[test]
+    fn excluded_generated_files() {
+        assert!(is_excluded(Path::new("src/bundle.min.js")));
+        assert!(is_excluded(Path::new("dist/style.min.css")));
+        assert!(is_excluded(Path::new("Cargo.lock")));
+        assert!(is_excluded(Path::new("go.sum")));
+        assert!(is_excluded(Path::new("package-lock.json")));
+        assert!(is_excluded(Path::new("yarn.lock")));
+    }
+
+    #[test]
+    fn not_excluded_normal_source() {
+        assert!(!is_excluded(Path::new("src/main.rs")));
+        assert!(!is_excluded(Path::new("src/index/parser.rs")));
+        assert!(!is_excluded(Path::new("tests/db.rs")));
+        assert!(!is_excluded(Path::new("README.md")));
+    }
+
+    // --- glob_match ---
+
+    #[test]
+    fn glob_exact_match() {
+        assert!(glob_match("src/main.rs", "src/main.rs"));
+        assert!(!glob_match("src/main.rs", "src/lib.rs"));
+    }
+
+    #[test]
+    fn glob_dir_prefix() {
+        // "vendor/" or "vendor/**" matches anything inside vendor/
+        assert!(glob_match("vendor/**", "vendor/foo/bar.rs"));
+        assert!(glob_match("vendor/", "vendor/foo/bar.rs"));
+        assert!(glob_match("vendor/**", "vendor"));
+        assert!(!glob_match("vendor/**", "src/vendor/foo.rs"));
+    }
+
+    #[test]
+    fn glob_double_star_prefix() {
+        // "**/foo" matches any path ending in /foo or equal to foo
+        assert!(glob_match("**/generated", "src/generated"));
+        assert!(glob_match("**/generated", "generated"));
+        assert!(!glob_match("**/generated", "src/generated/foo.rs"));
+    }
+
+    #[test]
+    fn glob_windows_backslash_normalised() {
+        // Windows paths with backslashes should match forward-slash patterns
+        assert!(glob_match("vendor/**", "vendor\\foo\\bar.rs"));
+        assert!(glob_match("src/main.rs", "src\\main.rs"));
+    }
+
+    #[test]
+    fn glob_no_partial_prefix_match() {
+        // "vendor/**" must not match a file whose path starts with "vendor" but
+        // is a different directory (e.g. "vendor_utils/foo.rs")
+        assert!(!glob_match("vendor/**", "vendor_utils/foo.rs"));
+    }
+}

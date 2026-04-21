@@ -315,3 +315,203 @@ pub fn build_embed_text(chunk: &Chunk, file_path: &str) -> String {
     }
     parts.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{build_embed_text, parse_file, Chunk, Lang};
+
+    fn parse_rust(src: &str) -> Vec<Chunk> {
+        parse_file(src, "src/lib.rs", &Lang::Rust)
+    }
+
+    fn parse_python(src: &str) -> Vec<Chunk> {
+        parse_file(src, "foo.py", &Lang::Python)
+    }
+
+    fn find<'a>(chunks: &'a [Chunk], name: &str) -> &'a Chunk {
+        chunks.iter().find(|c| c.symbol_name == name)
+            .unwrap_or_else(|| panic!("chunk '{name}' not found; got: {:?}", chunks.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()))
+    }
+
+    // --- Rust: basic symbol extraction ---
+
+    #[test]
+    fn rust_top_level_function() {
+        let chunks = parse_rust("fn greet(name: &str) -> String { format!(\"hello {name}\") }");
+        assert!(!chunks.is_empty(), "should extract at least one chunk");
+        let c = find(&chunks, "greet");
+        assert_eq!(c.symbol_kind, "function");
+        assert_eq!(c.qualified_name, "greet");
+        assert_eq!(c.language, "rust");
+    }
+
+    #[test]
+    fn rust_struct() {
+        let chunks = parse_rust("struct Foo { x: i32 }");
+        let c = find(&chunks, "Foo");
+        assert_eq!(c.symbol_kind, "struct");
+    }
+
+    #[test]
+    fn rust_enum() {
+        let chunks = parse_rust("enum Color { Red, Green, Blue }");
+        let c = find(&chunks, "Color");
+        assert_eq!(c.symbol_kind, "enum");
+    }
+
+    #[test]
+    fn rust_trait() {
+        let chunks = parse_rust("trait Speak { fn speak(&self) -> String; }");
+        let c = find(&chunks, "Speak");
+        assert_eq!(c.symbol_kind, "trait");
+    }
+
+    #[test]
+    fn rust_method_qualified_name() {
+        let src = r#"
+struct Counter { n: u32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+}
+"#;
+        let chunks = parse_rust(src);
+        let c = find(&chunks, "increment");
+        assert_eq!(c.qualified_name, "Counter::increment",
+            "method inside impl should get qualified name");
+    }
+
+    #[test]
+    fn rust_line_numbers_are_one_indexed() {
+        let src = "fn first() {}\nfn second() {}";
+        let chunks = parse_rust(src);
+        let first = find(&chunks, "first");
+        let second = find(&chunks, "second");
+        assert_eq!(first.line_start, 1);
+        assert_eq!(second.line_start, 2);
+    }
+
+    #[test]
+    fn rust_doc_comment_extracted() {
+        let src = r#"
+/// This is a doc comment.
+fn documented() -> i32 { 0 }
+"#;
+        let chunks = parse_rust(src);
+        let c = find(&chunks, "documented");
+        assert!(
+            c.doc_comment.as_deref().unwrap_or("").contains("This is a doc comment"),
+            "doc comment should be captured"
+        );
+    }
+
+    #[test]
+    fn rust_signature_strips_body() {
+        let src = "fn add(a: i32, b: i32) -> i32 { a + b }";
+        let chunks = parse_rust(src);
+        let c = find(&chunks, "add");
+        let sig = c.signature.as_deref().unwrap_or("");
+        assert!(sig.contains("fn add"), "signature should include fn keyword and name");
+        assert!(sig.contains("-> i32"), "signature should include return type");
+        assert!(!sig.contains("a + b"), "signature must not include function body");
+    }
+
+    #[test]
+    fn rust_empty_source_returns_no_chunks() {
+        assert!(parse_rust("").is_empty());
+        assert!(parse_rust("// just a comment").is_empty());
+        assert!(parse_rust("use std::fmt;").is_empty());
+    }
+
+    // --- Python: basic symbol extraction ---
+
+    #[test]
+    fn python_function() {
+        let chunks = parse_python("def greet(name):\n    return f'hello {name}'\n");
+        let c = find(&chunks, "greet");
+        assert_eq!(c.symbol_kind, "function");
+        assert_eq!(c.language, "python");
+    }
+
+    #[test]
+    fn python_class() {
+        let chunks = parse_python("class Animal:\n    pass\n");
+        let c = find(&chunks, "Animal");
+        assert_eq!(c.symbol_kind, "class");
+    }
+
+    #[test]
+    fn python_method_qualified_name() {
+        let src = "class Dog:\n    def bark(self):\n        print('woof')\n";
+        let chunks = parse_python(src);
+        let c = find(&chunks, "bark");
+        assert_eq!(c.qualified_name, "Dog.bark",
+            "method inside class should get qualified name");
+    }
+
+    #[test]
+    fn python_docstring_extracted() {
+        let src = "def documented():\n    \"\"\"This does something useful.\"\"\"\n    pass\n";
+        let chunks = parse_python(src);
+        let c = find(&chunks, "documented");
+        assert!(
+            c.doc_comment.as_deref().unwrap_or("").contains("something useful"),
+            "Python docstring should be captured"
+        );
+    }
+
+    // --- build_embed_text ---
+
+    #[test]
+    fn embed_text_includes_kind_and_name() {
+        let chunk = Chunk {
+            symbol_name: "my_func".to_string(),
+            qualified_name: "MyStruct::my_func".to_string(),
+            symbol_kind: "function".to_string(),
+            signature: None,
+            doc_comment: None,
+            body_preview: None,
+            line_start: 1,
+            line_end: 5,
+            language: "rust".to_string(),
+        };
+        let text = build_embed_text(&chunk, "src/lib.rs");
+        assert!(text.contains("function: my_func"));
+        assert!(text.contains("File: src/lib.rs"));
+    }
+
+    #[test]
+    fn embed_text_includes_signature_when_present() {
+        let chunk = Chunk {
+            symbol_name: "add".to_string(),
+            qualified_name: "add".to_string(),
+            symbol_kind: "function".to_string(),
+            signature: Some("fn add(a: i32, b: i32) -> i32".to_string()),
+            doc_comment: None,
+            body_preview: None,
+            line_start: 1,
+            line_end: 1,
+            language: "rust".to_string(),
+        };
+        let text = build_embed_text(&chunk, "src/math.rs");
+        assert!(text.contains("Signature: fn add(a: i32, b: i32) -> i32"));
+    }
+
+    #[test]
+    fn embed_text_strips_doc_comment_markers() {
+        let chunk = Chunk {
+            symbol_name: "foo".to_string(),
+            qualified_name: "foo".to_string(),
+            symbol_kind: "function".to_string(),
+            signature: None,
+            doc_comment: Some("/// Returns the answer.".to_string()),
+            body_preview: None,
+            line_start: 1,
+            line_end: 1,
+            language: "rust".to_string(),
+        };
+        let text = build_embed_text(&chunk, "src/lib.rs");
+        // Comment markers stripped, content kept
+        assert!(text.contains("Returns the answer"));
+        assert!(!text.contains("///"));
+    }
+}

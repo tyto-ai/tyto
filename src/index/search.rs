@@ -304,7 +304,7 @@ pub fn format_result(r: &CodeResult, verbose: bool) -> String {
     out
 }
 
-fn build_fts_query(query: &str) -> String {
+pub(crate) fn build_fts_query(query: &str) -> String {
     query
         .split_whitespace()
         .filter_map(|w| {
@@ -313,4 +313,52 @@ fn build_fts_query(query: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_fts_query;
+
+    #[test]
+    fn fts_basic_terms() {
+        let q = build_fts_query("index file");
+        assert!(q.contains("\"index\"*"));
+        assert!(q.contains("\"file\"*"));
+    }
+
+    #[test]
+    fn fts_strips_special_chars() {
+        // Dots, dashes, and other non-alphanumeric chars stripped
+        let q = build_fts_query("file.path foo-bar");
+        // "file.path" → "filepath" (dot removed)
+        assert!(q.contains("\"filepath\"*"));
+        // "foo-bar" → "foobar" (dash removed)
+        assert!(q.contains("\"foobar\"*"));
+    }
+
+    #[test]
+    fn fts_empty_tokens_dropped() {
+        // A query of only special chars produces no terms
+        let q = build_fts_query("... --- !!!");
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn fts_single_term() {
+        let q = build_fts_query("ownership");
+        assert_eq!(q, "\"ownership\"*");
+    }
+
+    #[test]
+    fn fts_underscores_preserved() {
+        // Underscores are alphanumeric-adjacent and kept
+        let q = build_fts_query("my_function");
+        assert!(q.contains("\"my_function\"*"));
+    }
+
+    #[test]
+    fn fts_empty_input() {
+        assert!(build_fts_query("").is_empty());
+        assert!(build_fts_query("   ").is_empty());
+    }
 }

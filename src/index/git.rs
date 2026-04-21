@@ -83,11 +83,61 @@ pub fn files_in_head_commit(repo_root: &Path) -> Vec<String> {
 }
 
 /// Returns false for noise commits that pollute the history embedding.
-fn is_significant(msg: &str) -> bool {
+pub(crate) fn is_significant(msg: &str) -> bool {
     if msg.len() < 15 {
         return false;
     }
     let lower = msg.to_lowercase();
     let skip_prefixes = ["merge", "revert", "bump", "wip", "fixup!", "squash!", "chore: bump"];
     skip_prefixes.iter().all(|p| !lower.starts_with(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_significant;
+
+    #[test]
+    fn significant_normal_commit() {
+        assert!(is_significant("feat: add user authentication"));
+        assert!(is_significant("fix: resolve race condition in indexer"));
+        assert!(is_significant("refactor: extract DbReady into separate struct"));
+    }
+
+    #[test]
+    fn insignificant_too_short() {
+        assert!(!is_significant("fix"));
+        assert!(!is_significant("wip"));
+        assert!(!is_significant("tmp fix"));
+        // Exactly 14 chars: below the 15-char threshold
+        assert!(!is_significant("short message!"));
+    }
+
+    #[test]
+    fn insignificant_noise_prefixes() {
+        assert!(!is_significant("Merge pull request #42 from foo/bar"));
+        assert!(!is_significant("merge branch main into feature/x"));
+        assert!(!is_significant("revert \"feat: add something\""));
+        assert!(!is_significant("bump version to 1.2.3"));
+        assert!(!is_significant("WIP: half-done refactor"));
+        assert!(!is_significant("fixup! fix: typo in comment"));
+        assert!(!is_significant("squash! feat: add auth"));
+        assert!(!is_significant("chore: bump dependencies"));
+    }
+
+    #[test]
+    fn prefix_match_is_case_insensitive() {
+        assert!(!is_significant("MERGE branch main into dev"));
+        assert!(!is_significant("Revert previous commit because it broke things"));
+        assert!(!is_significant("Bump serde from 1.0.1 to 1.0.2"));
+    }
+
+    #[test]
+    fn non_noise_prefix_containing_noise_word_is_significant() {
+        // "merged" starts with "merge" — must be filtered
+        assert!(!is_significant("merged the auth feature into main branch"));
+        // "bumping" starts with "bump" — must be filtered
+        assert!(!is_significant("bumping all deps to latest versions"));
+        // But a commit that merely contains the word mid-sentence is fine
+        assert!(is_significant("fix: don't revert index on partial failure"));
+    }
 }
