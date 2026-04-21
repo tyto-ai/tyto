@@ -21,17 +21,17 @@ impl Embedder {
     pub fn load() -> Result<Self> {
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("memso")
+            .join("tyto")
             .join("models");
 
-        // MEMSO_FORCE_MODEL_REFRESH=1: delete the model cache before loading so
+        // TYTO_FORCE_MODEL_REFRESH=1: delete the model cache before loading so
         // fastembed re-downloads a fresh copy. Useful for troubleshooting a
         // corrupted model or testing the cold-start download path locally.
-        if std::env::var("MEMSO_FORCE_MODEL_REFRESH").as_deref() == Ok("1")
+        if std::env::var("TYTO_FORCE_MODEL_REFRESH").as_deref() == Ok("1")
             && cache_dir.exists()
         {
             std::fs::remove_dir_all(&cache_dir)
-                .context("MEMSO_FORCE_MODEL_REFRESH: failed to remove model cache")?;
+                .context("TYTO_FORCE_MODEL_REFRESH: failed to remove model cache")?;
         }
 
         let model = TextEmbedding::try_new(

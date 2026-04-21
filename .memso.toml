@@ -1,6 +1,0 @@
-[backend]
-mode = "remote"
-remote_url = "libsql://memory-memso-beefsack.aws-ap-northeast-1.turso.io"
-
-[memory]
-project_id = "memso"

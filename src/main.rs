@@ -1,10 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use memso::{config::Config, inject, install, remote, serve, status};
+use tyto::{config::Config, inject, install, remote, serve, status};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "memso", version, about = "Persistent memory for AI agents")]
+#[command(name = "tyto", version, about = "Persistent memory and code intelligence for AI agents")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -14,7 +14,7 @@ struct Cli {
 enum Command {
     /// Start the MCP server over stdio
     Serve {
-        #[arg(long, help = "Path to .memso.toml (default: auto-discover)")]
+        #[arg(long, help = "Path to .tyto.toml (default: auto-discover)")]
         config: Option<PathBuf>,
     },
     /// Inject memory context into agent hooks (short-lived, always exits 0)
@@ -35,7 +35,7 @@ enum Command {
         #[command(subcommand)]
         subcommand: RemoteCommand,
     },
-    /// Install memso into Claude Code (adds MCP server + hooks to settings.json)
+    /// Install tyto into Claude Code (adds MCP server + hooks to settings.json)
     Install {
         #[arg(long, help = "Preview changes without writing anything")]
         dry_run: bool,
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         }
         Command::Inject { r#type, project, query, limit, budget } => {
             if let Err(e) = inject::run(&r#type, project, query, limit, budget).await {
-                eprintln!("memso inject error: {e}");
+                eprintln!("tyto inject error: {e}");
             }
         }
         Command::Remote { subcommand } => {
@@ -98,9 +98,9 @@ async fn main() -> Result<()> {
             let result = install::run(dry_run)?;
             let prefix = if dry_run { "[dry-run] " } else { "" };
             if result.mcp_added {
-                println!("{prefix}Added MCP server 'memso' to {}", result.settings_path.display());
+                println!("{prefix}Added MCP server 'tyto' to {}", result.settings_path.display());
             } else {
-                println!("MCP server 'memso' already configured - skipped");
+                println!("MCP server 'tyto' already configured - skipped");
             }
             if result.session_hook_added {
                 println!("{prefix}Added SessionStart hook");
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
             }
             if !result.mcp_added && !result.session_hook_added && !result.prompt_hook_added
                 && !result.stop_hook_added && !result.compact_hook_added {
-                println!("Nothing to do - memso is already fully configured.");
+                println!("Nothing to do - tyto is already fully configured.");
             } else if !dry_run {
                 println!("\nDone. Restart Claude Code for changes to take effect.");
             }

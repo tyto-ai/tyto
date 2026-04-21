@@ -3,9 +3,9 @@ use chrono::Utc;
 use std::env;
 use std::io::{IsTerminal, Read};
 
-use crate::{config::{BackendMode, Config}, db::Db, migrations, project_id, retrieve};
+use crate::{config::{StorageMode, Config}, db::Db, migrations, project_id, retrieve};
 
-const INSTRUCTIONS: &str = "[memso] Store every decision, discovery, gotcha, failure, and unexpected outcome. \
+const INSTRUCTIONS: &str = "[tyto] Store every decision, discovery, gotcha, failure, and unexpected outcome. \
 Err on the side of storing - use importance (0.0-1.0) to signal value, not omission. \
 Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
 When you find a bug: store it as gotcha before writing the fix. \
@@ -18,13 +18,13 @@ call search_memory for gaps not covered by the index. \
 capture_note(summary) = your reasoning before/after a change, reviewed next session. \
 store_memory = a fact you would want to search for today or in a future session. \
 They are not interchangeable.\n\
-[memso tools] store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
+[tyto tools] store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
 search_memory(query,[limit,detail]) | get_memories(ids) | \
 list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
 pin_memories(ids,pin) | delete_memories(ids) | \
 list_stale_memories() | evict_stale_memories() | session_context()\n";
 
-/// The three observable states of `memso serve` from inject's perspective.
+/// The three observable states of `tyto serve` from inject's perspective.
 enum ServeState {
     /// No serve process is running. inject should open the DB directly.
     NotRunning,
@@ -59,15 +59,15 @@ fn serve_state(config: &Config) -> ServeState {
 /// Emitted to the agent when serve is still loading (first-run model download).
 /// UX requirement: always tell the user what is happening, why, and how long.
 const LOADING_MESSAGE: &str =
-    "[memso] The memory server is still starting up.\n\
-     On first install, memso downloads a ~22MB embedding model — this takes up to a minute.\n\
+    "[tyto] The memory server is still starting up.\n\
+     On first install, tyto downloads a ~22MB embedding model — this takes up to a minute.\n\
      Memory tools (search_memory, store_memories, etc.) will return a 'loading' message \
      until startup is complete.\n\n\
      Do the following right now, before responding to the user's request:\n\
-     1. Inform the user: \"memso is loading its embedding model (first-run setup, ~1 minute). \
+     1. Inform the user: \"tyto is loading its embedding model (first-run setup, ~1 minute). \
         Memory context is not available yet.\"\n\
-     2. Continue with the user's request as normal — do not block on memso.\n\
-     3. Once memso has finished loading, call the session_context tool to load memory \
+     2. Continue with the user's request as normal — do not block on tyto.\n\
+     3. Once tyto has finished loading, call the session_context tool to load memory \
         context for this session. If session_context returns a 'loading' message, \
         wait a few seconds and retry.";
 
@@ -75,7 +75,7 @@ fn build_session_instructions(session_path: Option<&std::path::Path>) -> String 
     match session_path {
         None => String::new(),
         Some(path) => format!(
-            "[memso] Session start — BEFORE responding to the user, read this file \
+            "[tyto] Session start — BEFORE responding to the user, read this file \
              completely and execute every instruction defined in it: {}\n",
             path.display()
         ),
@@ -96,7 +96,7 @@ pub async fn run(
 
     if let Err(e) = run_inner(inject_type, project_override, query_override, limit, budget).await {
         println!(
-            "[memso] CRITICAL: Memory system unavailable - memories were NOT loaded for this \
+            "[tyto] CRITICAL: Memory system unavailable - memories were NOT loaded for this \
              session and storing new memories will fail. Inform the user of this immediately \
              before doing anything else.\nCause: {e:#}"
         );
@@ -115,19 +115,18 @@ async fn run_inner(
     let config = Config::load(&cwd)?;
 
     // No project_id means no config or config without project_id. Skip all DB work
-    // so no .memso directory is created. On session/compact types, emit a message so
+    // so no DB is opened. On session/compact types, emit a message so
     // the AI can surface the setup instructions to the user.
-    if config.memory.project_id.is_none() {
+    if config.project_id.is_none() {
         if inject_type == "session" || inject_type == "compact" {
             let suggested = crate::project_id::infer(&config.project_root);
             println!(
-                "[memso] memso has loaded, but there is no `.memso.toml` configuration \
+                "[tyto] tyto has loaded, but there is no `.tyto.toml` configuration \
                  file for this project, so memories will not be stored or retrieved this \
                  session.\n\
-                 Inform the user of this. Offer to set up memso by creating a \
-                 `.memso.toml` file. Suggested configuration:\n\n\
+                 Inform the user of this. Offer to set up tyto by creating a \
+                 `.tyto.toml` file. Suggested configuration:\n\n\
                  ```toml\n\
-                 [memory]\n\
                  project_id = \"{suggested}\"\n\
                  ```\n\
                  Ask the user whether to use this value or a different project_id."
@@ -136,7 +135,7 @@ async fn run_inner(
         return Ok(());
     }
 
-    // Check for a crash log written by a previous `memso serve` session.
+    // Check for a crash log written by a previous `tyto serve` session.
     // Output to stdout so it lands in additionalContext before any memory content.
     let crash_log_path = config.db_path()
         .parent()
@@ -144,22 +143,22 @@ async fn run_inner(
         .unwrap_or_else(|| std::path::PathBuf::from("crash.log"));
     if let Ok(crash) = std::fs::read_to_string(&crash_log_path) {
         println!(
-            "[memso] WARNING: memso crashed in a previous session. \
+            "[tyto] WARNING: tyto crashed in a previous session. \
              Inform the user of this before doing anything else - \
              recent memories may not have been saved.\nCrash report: {crash}"
         );
     }
 
-    // If `memso serve` is running, skip Db::open to avoid racing on the DB file.
+    // If `tyto serve` is running, skip Db::open to avoid racing on the DB file.
     // Not applicable for remote mode: Turso handles concurrent connections safely.
     // We distinguish Ready (tools work) from Loading (tools return "syncing") so we
     // can give the user accurate information about what is happening and what to expect.
-    if !matches!(config.backend.mode, BackendMode::Remote) {
+    if !matches!(config.memory.storage.mode, StorageMode::Remote) {
         match serve_state(&config) {
             ServeState::Ready => {
                 if inject_type == "session" || inject_type == "compact" {
                     println!(
-                        "{INSTRUCTIONS}[memso] MCP server is running — memory context is available via tools. \
+                        "{INSTRUCTIONS}[tyto] MCP server is running — memory context is available via tools. \
                          Use search_memory / list_memories for context retrieval this session."
                     );
                 }
@@ -184,7 +183,7 @@ async fn run_inner(
     migrations::run(&conn).await?;
 
     let pid = project_override
-        .unwrap_or_else(|| project_id::resolve(&config.project_root, config.memory.project_id.as_deref()));
+        .unwrap_or_else(|| project_id::resolve(&config.project_root, config.project_id.as_deref()));
 
     match inject_type {
         "session" | "compact" => run_session(&conn, &pid, budget).await,
@@ -217,7 +216,7 @@ async fn run_prompt(
 }
 
 const STOP_INSTRUCTIONS: &str =
-    "[memso] End of turn checkpoint - store anything worth keeping before moving on:\n\
+    "[tyto] End of turn checkpoint - store anything worth keeping before moving on:\n\
 - Found a bug or unexpected behavior?     -> store_memory type=gotcha importance>=0.8\n\
 - Understood how a subsystem works?       -> store_memory type=how-it-works\n\
 - Made a design or implementation choice? -> store_memory type=decision\n\
@@ -300,7 +299,7 @@ async fn run_session(
     // Write a single session file when either section has content.
     // Write before marking captures presented so a write failure leaves them unpresented.
     let session_path = if !captures.is_empty() || !memories_content.is_empty() {
-        let path = std::env::temp_dir().join(format!("memso-session-{pid}.txt"));
+        let path = std::env::temp_dir().join(format!("tyto-session-{pid}.txt"));
         std::fs::write(&path, format_session_file(&captures, &memories_content))?;
         if !captures.is_empty() {
             mark_captures_presented(conn, project_id).await?;
@@ -378,7 +377,7 @@ fn format_session_file(captures: &[PendingCapture], memories_content: &str) -> S
          Before writing any response to the user, you must:\n\
          1. Read this file completely, from top to bottom.\n\
          2. Execute every instruction in it.\n\n\
-         Your first output line must be exactly: [memso: init]\n\
+         Your first output line must be exactly: [tyto: init]\n\
          This is required even if the user's request is trivial or urgent.\n\
          Skipping, abbreviating, or deferring any part of this is a critical process violation \
          that directly harms the quality of your response.\n\n",
@@ -536,7 +535,7 @@ fn format_full_memory(mem: &retrieve::FullMemory) -> String {
 /// Also marks any pending captures as presented.
 ///
 /// Called by `serve::session_context` tool — this is the recovery path when
-/// `memso serve` was still loading at session start.
+/// `tyto serve` was still loading at session start.
 pub async fn build_tool_session_content(
     conn: &libsql::Connection,
     project_id: &str,
@@ -592,7 +591,7 @@ fn print_within_budget(output: &str, budget: usize) {
         let truncated = &output[..budget];
         if let Some(pos) = truncated.rfind('\n') {
             print!("{}", &truncated[..pos]);
-            println!("\n[memso: output truncated to fit budget]");
+            println!("\n[tyto: output truncated to fit budget]");
         } else {
             print!("{truncated}");
         }

@@ -5,8 +5,8 @@
 
   languages.rust.enable = true;
 
-  env.MEMSO_BINARY_OVERRIDE = "${config.devenv.root}/target/release/memso";
-  env.MEMSO_CHANNEL = "dev";
+  env.TYTO_BINARY_OVERRIDE = "${config.devenv.root}/target/release/tyto";
+  env.TYTO_CHANNEL = "dev";
 
   packages = with pkgs; [
     act

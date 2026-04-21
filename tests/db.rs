@@ -1,6 +1,6 @@
 /// Integration tests using an in-memory libsql database.
 /// These cover store, retrieve, and migrations together.
-use memso::{migrations, retrieve, store};
+use tyto::{migrations, retrieve, store};
 
 /// Insert a minimal memory row directly, bypassing store (no embedding needed).
 async fn insert_raw(db: &TestDb, id: &str, title: &str) {

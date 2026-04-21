@@ -2007,36 +2007,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memso"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "fastembed",
- "figment",
- "fs4",
- "hex",
- "ignore",
- "libsql",
- "regex",
- "reqwest 0.13.2",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "serde_with",
- "sha2",
- "tokio",
- "toml_edit",
- "tree-sitter",
- "tree-sitter-python",
- "tree-sitter-rust",
- "uuid",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3836,6 +3806,36 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "tyto"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs",
+ "fastembed",
+ "figment",
+ "fs4",
+ "hex",
+ "ignore",
+ "libsql",
+ "regex",
+ "reqwest 0.13.2",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2",
+ "tokio",
+ "toml_edit",
+ "tree-sitter",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "uuid",
+]
 
 [[package]]
 name = "uncased"

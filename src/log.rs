@@ -19,7 +19,7 @@ pub fn init(path: &Path) {
         Ok(f) => {
             let _ = LOG_FILE.set(Mutex::new(f));
         }
-        Err(e) => eprintln!("[memso] WARNING: could not open log file {}: {e}", path.display()),
+        Err(e) => eprintln!("[tyto] WARNING: could not open log file {}: {e}", path.display()),
     }
 }
 

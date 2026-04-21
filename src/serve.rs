@@ -51,7 +51,7 @@ enum DbState {
 }
 
 #[derive(Clone)]
-struct MemsoServer {
+struct TytoServer {
     db: tokio::sync::watch::Receiver<DbState>,
     idx: tokio::sync::watch::Receiver<index::IndexState>,
     write_lock: WriteLock,
@@ -64,18 +64,18 @@ struct MemsoServer {
     prompt_router: PromptRouter<Self>,
 }
 
-impl MemsoServer {
+impl TytoServer {
     /// Returns the ready state or an actionable error string if still syncing or failed.
     /// Call at the top of every tool handler that needs the DB or embedder.
     fn try_ready(&self) -> Result<Arc<DbReady>, String> {
         match &*self.db.borrow() {
             DbState::Syncing => Err(
-                "memso is syncing the memory database locally (initial replication). \
+                "tyto is syncing the memory database locally (initial replication). \
                  Please wait a moment and retry."
                     .to_string(),
             ),
             DbState::Ready(r) => Ok(Arc::clone(r)),
-            DbState::Failed(msg) => Err(format!("memso database initialisation failed: {msg}")),
+            DbState::Failed(msg) => Err(format!("tyto database initialisation failed: {msg}")),
         }
     }
 
@@ -86,7 +86,7 @@ impl MemsoServer {
             ),
             index::IndexState::Ready(r) => Ok(Arc::clone(r)),
             index::IndexState::Disabled => Err(
-                "Code indexing is disabled. Set [index] enabled = true in .memso.toml to enable.".to_string()
+                "Code indexing is disabled. Set [index] mode = \"managed\" in .tyto.toml to enable.".to_string()
             ),
             index::IndexState::Failed(msg) => Err(format!("Code index failed: {msg}")),
         }
@@ -314,25 +314,25 @@ struct MigrateToTursoInput {
 // --- Prompt implementations ---
 
 #[prompt_router]
-impl MemsoServer {
+impl TytoServer {
     #[prompt(
         name = "remote_enable",
-        description = "Enable remote sync by migrating the local memso database to a remote backend"
+        description = "Enable remote sync by migrating the local tyto database to a remote backend"
     )]
     async fn remote_enable(
         &self,
         Parameters(input): Parameters<MigrateToTursoInput>,
     ) -> Vec<PromptMessage> {
         let cmd = match input.to_turso {
-            Some(ref url) => format!("memso remote enable --url {url}"),
-            None => "memso remote enable".to_string(),
+            Some(ref url) => format!("tyto remote enable --url {url}"),
+            None => "tyto remote enable".to_string(),
         };
         vec![PromptMessage::new_text(
             PromptMessageRole::User,
             format!(
-                "Please run `{cmd}` to enable remote sync for memso. \
+                "Please run `{cmd}` to enable remote sync for tyto. \
                  You will need --url <url> and --token <token> (get these from the Turso dashboard or `turso db show` / `turso db tokens create`). \
-                 Set MEMSO_BACKEND__AUTH_TOKEN in your environment and restart Claude Code when done."
+                 Set TYTO__MEMORY__REMOTE_AUTH_TOKEN in your environment and restart Claude Code when done."
             ),
         )]
     }
@@ -341,7 +341,7 @@ impl MemsoServer {
 // --- Tool implementations ---
 
 #[tool_router]
-impl MemsoServer {
+impl TytoServer {
     #[tool(description = "Store or upsert one or more memories. Accepts an array - use for batch storage at session-start review or when storing related memories together. Use topic_key for upsert semantics.")]
     async fn store_memories(&self, Parameters(input): Parameters<StoreMemoriesInput>) -> Result<String, String> {
         let ready = self.try_ready()?;
@@ -529,7 +529,7 @@ impl MemsoServer {
     }
 
     #[tool(description = "Load session memory context: pending review captures and top memories for this project. \
-        Call this at session start if memso was still loading when the session began (embedding model download on first install). \
+        Call this at session start if tyto was still loading when the session began (embedding model download on first install). \
         Returns a 'loading' message if the database is not yet ready — wait a few seconds and retry. \
         Marks pending captures as presented.")]
     async fn session_context(&self) -> Result<String, String> {
@@ -679,10 +679,10 @@ impl MemsoServer {
 
 #[tool_handler]
 #[prompt_handler]
-impl ServerHandler for MemsoServer {
+impl ServerHandler for TytoServer {
     fn get_info(&self) -> InitializeResult {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().enable_prompts().build())
-            .with_server_info(Implementation::new("memso", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("tyto", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Persistent memory and code intelligence across sessions. \
                  Store every decision, discovery, gotcha, failure, and unexpected outcome - \
@@ -730,7 +730,7 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
                 .await
             {
                 Ok(r) => r,
-                Err(e) => { eprintln!("memso: reembed scan failed: {e}"); return; }
+                Err(e) => { eprintln!("tyto: reembed scan failed: {e}"); return; }
             };
             let mut out = Vec::new();
             while let Ok(Some(row)) = rows.next().await {
@@ -743,7 +743,7 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
 
         if batch.is_empty() {
             if total > 0 {
-                eprintln!("memso: re-embedded {total} memories to model {model}");
+                eprintln!("tyto: re-embedded {total} memories to model {model}");
             }
             return;
         }
@@ -753,7 +753,7 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
                 let mut e = embedder.lock().await;
                 match e.embed(&text) {
                     Ok(v) => v,
-                    Err(e) => { eprintln!("memso: reembed failed for {id}: {e}"); continue; }
+                    Err(e) => { eprintln!("tyto: reembed failed for {id}: {e}"); continue; }
                 }
             };
             let blob = crate::embed::floats_to_blob(&embedding);
@@ -778,22 +778,20 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
 
 pub async fn run(config: Config) -> Result<()> {
     // If no project_id is configured, run in inert mode: MCP server starts so the
-    // agent can respond to tool calls, but no DB is opened, no embedder loaded, and
-    // no .memso directory is created. All tool calls return a helpful "no config"
-    // message that the AI can surface to the user.
-    if config.memory.project_id.is_none() {
+    // agent can respond to tool calls, but no DB is opened, no embedder loaded. All
+    // tool calls return a helpful "no config" message that the AI can surface to the user.
+    if config.project_id.is_none() {
         return serve_no_config(config).await;
     }
 
     // Init file logger first — all subsequent mlog! calls mirror to this file.
-    // Location: .memso/memso-serve.log next to crash.log and the database.
     let log_path = config.db_path()
         .parent()
-        .map(|p| p.join("memso-serve.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("memso-serve.log"));
+        .map(|p| p.join("tyto-serve.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("tyto-serve.log"));
     crate::log::init(&log_path);
 
-    mlog!("=== memso serve starting ===");
+    mlog!("=== tyto serve starting ===");
     mlog!("version: {}", env!("CARGO_PKG_VERSION"));
     mlog!("platform: {}/{}", std::env::consts::OS, std::env::consts::ARCH);
     mlog!("log file: {}", log_path.display());
@@ -801,12 +799,12 @@ pub async fn run(config: Config) -> Result<()> {
         mlog!("cwd: {}", cwd.display());
     }
     mlog!("project root: {}", config.project_root.display());
-    mlog!("backend: {:?}", config.backend);
+    mlog!("memory: {:?}", config.memory.storage);
 
-    let pid = project_id::resolve(&config.project_root, config.memory.project_id.as_deref());
+    let pid = project_id::resolve(&config.project_root, config.project_id.as_deref());
 
     // Set up crash log and panic hook before any fallible work.
-    // crash.log is read by `memso inject` on next session start and surfaced to the AI.
+    // crash.log is read by `tyto inject` on next session start and surfaced to the AI.
     let crash_log = config.db_path()
         .parent()
         .map(|p| p.join("crash.log"))
@@ -834,27 +832,25 @@ pub async fn run(config: Config) -> Result<()> {
             .open(&crash_log)
             .and_then(|mut f| writeln!(f, "{}", msg.trim()));
     }
-    mlog!("=== memso serve exiting ===");
+    mlog!("=== tyto serve exiting ===");
     result
 }
 
-/// Start the MCP server in inert mode when no `.memso.toml` with a `project_id`
+/// Start the MCP server in inert mode when no `.tyto.toml` with a `project_id`
 /// is found. The server is fully reachable so the AI can call tools, but every
-/// tool call returns a "no config" message with setup instructions. No database
-/// is opened, no embedder loaded, and no `.memso/` directory is created.
+/// tool call returns a "no config" message with setup instructions.
 async fn serve_no_config(config: Config) -> Result<()> {
     let suggested = project_id::infer(&config.project_root);
     let no_config_msg = format!(
-        "memso has loaded, but there is no `.memso.toml` configuration file for this \
+        "tyto has loaded, but there is no `.tyto.toml` configuration file for this \
          project, so memories will not be stored or retrieved this session.\n\
-         If you would like to enable memories, please ask me to create a `.memso.toml` \
+         If you would like to enable memories, please ask me to create a `.tyto.toml` \
          file. Suggested configuration based on this project:\n\n\
          ```toml\n\
-         [memory]\n\
          project_id = \"{suggested}\"\n\
          ```"
     );
-    eprintln!("memso: running in inert mode (no .memso.toml with project_id found)");
+    eprintln!("tyto: running in inert mode (no .tyto.toml with project_id found)");
 
     // Put the server immediately into a permanent Failed state. Every tool call
     // will return the no-config message via try_ready(). The watch sender is kept
@@ -862,15 +858,15 @@ async fn serve_no_config(config: Config) -> Result<()> {
     let (_db_tx, db_rx) = tokio::sync::watch::channel(DbState::Failed(no_config_msg));
     let (_idx_tx, idx_rx) = tokio::sync::watch::channel(index::IndexState::Disabled);
 
-    let server = MemsoServer {
+    let server = TytoServer {
         db: db_rx,
         idx: idx_rx,
         write_lock: store::new_write_lock(),
         session_id: Uuid::new_v4().to_string(),
         project_id: suggested,
         config: Arc::new(config),
-        tool_router: MemsoServer::tool_router(),
-        prompt_router: MemsoServer::prompt_router(),
+        tool_router: TytoServer::tool_router(),
+        prompt_router: TytoServer::prompt_router(),
     };
 
     let service = server.serve(stdio()).await?;
@@ -905,73 +901,74 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     // Keep lock_file alive (lock held) until end of function.
 
     let session_id = Uuid::new_v4().to_string();
-    mlog!("memso: session {session_id}, project \"{project_id}\"");
+    mlog!("tyto: session {session_id}, project \"{project_id}\"");
 
-    let server = MemsoServer {
+    let server = TytoServer {
         db: db_rx,
         idx: idx_rx,
         write_lock: store::new_write_lock(),
         session_id,
         project_id: project_id.clone(),
         config: Arc::new(config.clone()),
-        tool_router: MemsoServer::tool_router(),
-        prompt_router: MemsoServer::prompt_router(),
+        tool_router: TytoServer::tool_router(),
+        prompt_router: TytoServer::prompt_router(),
     };
 
     // Start MCP transport immediately — Claude Code sees us as connected right away.
     // Tool calls during the sync window return a "syncing" message instead of blocking.
     let service = server.serve(stdio()).await?;
-    mlog!("memso: ready (syncing database in background)");
+    mlog!("tyto: ready (syncing database in background)");
 
     // Spawn background task: open memory DB, run migrations, load embedder.
     // Once ready, also start the code indexer as a nested background task.
     let ready_file_bg = ready_file.clone();
     let config_for_idx = config.clone();
-    let project_id_for_idx = project_id.clone();
     tokio::spawn(async move {
         match init_db_and_embedder(&config).await {
             Ok(ready) => {
                 let embedder_for_idx = Arc::clone(&ready.embedder);
                 let _ = db_tx.send(DbState::Ready(Arc::new(ready)));
                 let _ = std::fs::write(&ready_file_bg, "");
-                mlog!("memso: database ready");
+                mlog!("tyto: database ready");
 
                 // Start code intelligence indexer (non-blocking: failures don't affect memory)
-                if config_for_idx.index.enabled {
-                    let db_path = config_for_idx.index_db_path(&project_id_for_idx);
+                use crate::config::StorageMode;
+                let index_enabled = !matches!(config_for_idx.index.storage.mode, StorageMode::Disabled);
+                if index_enabled {
+                    let db_path = config_for_idx.index_db_path();
                     let project_root = config_for_idx.project_root.clone();
                     let git_history = config_for_idx.index.git_history;
                     let extra_excludes = config_for_idx.index.exclude.clone();
                     tokio::spawn(async move {
-                        mlog!("memso: opening code index at {}", db_path.display());
+                        mlog!("tyto: opening code index at {}", db_path.display());
                         match index::open(&db_path, project_root.clone(), git_history, Arc::clone(&embedder_for_idx)).await {
                             Ok(idx_ready) => {
                                 let idx_ready = Arc::new(idx_ready);
                                 let _ = idx_tx.send(index::IndexState::Ready(Arc::clone(&idx_ready)));
-                                mlog!("memso: code index ready, starting background indexing...");
+                                mlog!("tyto: code index ready, starting background indexing...");
                                 let conn = Arc::clone(&idx_ready.conn);
                                 let emb = Arc::clone(&embedder_for_idx);
                                 match index::indexer::run(project_root, conn, emb, git_history, extra_excludes).await {
                                     Ok(r) => mlog!(
-                                        "memso: code index complete — {} files, {} chunks",
+                                        "tyto: code index complete — {} files, {} chunks",
                                         r.files_indexed, r.chunks_stored
                                     ),
-                                    Err(e) => mlog!("memso: code index run failed: {e:#}"),
+                                    Err(e) => mlog!("tyto: code index run failed: {e:#}"),
                                 }
                             }
                             Err(e) => {
-                                mlog!("memso: code index open failed: {e:#}");
+                                mlog!("tyto: code index open failed: {e:#}");
                                 let _ = idx_tx.send(index::IndexState::Failed(format!("{e:#}")));
                             }
                         }
                     });
                 } else {
                     let _ = idx_tx.send(index::IndexState::Disabled);
-                    mlog!("memso: code indexing disabled in config");
+                    mlog!("tyto: code indexing disabled in config");
                 }
             }
             Err(e) => {
-                mlog!("memso: database init failed: {e:#}");
+                mlog!("tyto: database init failed: {e:#}");
                 let _ = db_tx.send(DbState::Failed(format!("{e:#}")));
                 let _ = idx_tx.send(index::IndexState::Disabled);
             }
@@ -983,7 +980,7 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     let serve_result: Result<()> = tokio::select! {
         result = service.waiting() => result.map(|_| ()).map_err(Into::into),
         _ = shutdown_signal() => {
-            mlog!("memso: shutting down");
+            mlog!("tyto: shutting down");
             Ok(())
         }
         _ = wait_db_failed(&mut db_rx_monitor) => {
@@ -1029,14 +1026,14 @@ async fn wait_db_failed(rx: &mut tokio::sync::watch::Receiver<DbState>) {
 }
 
 async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
-    mlog!("memso: opening database...");
+    mlog!("tyto: opening database...");
     let db = Db::open(config).await?;
     let conn = Arc::new(db.conn);
 
-    mlog!("memso: running migrations...");
+    mlog!("tyto: running migrations...");
     migrations::run(&conn).await?;
 
-    mlog!("memso: loading embedding model (first run will download ~22MB)...");
+    mlog!("tyto: loading embedding model (first run will download ~22MB)...");
     let embedder = Arc::new(Mutex::new(Embedder::load()?));
 
     // Re-embed any memories whose vectors were generated by a different model.

@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use libsql::{Builder, Connection};
-use crate::config::{BackendMode, RemoteMode, Config};
+use crate::config::{StorageMode, RemoteMode, Config};
 
 pub async fn enable(
     config: &Config,
@@ -16,10 +16,10 @@ pub async fn enable(
         bail!("Local database not found at {}", local_path.display());
     }
 
-    println!("memso remote enable");
-    println!("===================");
+    println!("tyto remote enable");
+    println!("==================");
     println!();
-    println!("NOTE: Ensure Claude Code (memso serve) is not running before proceeding.");
+    println!("NOTE: Ensure Claude Code (tyto serve) is not running before proceeding.");
     println!("      Concurrent writes during migration can result in data loss.");
     println!();
 
@@ -71,7 +71,7 @@ pub async fn enable(
     println!("      Local backup retained at {}", local_path.display());
 
     println!();
-    println!("Done. Set MEMSO_BACKEND__AUTH_TOKEN in your environment and restart Claude Code.");
+    println!("Done. Set TYTO__MEMORY__REMOTE_AUTH_TOKEN in your environment and restart Claude Code.");
 
     Ok(())
 }
@@ -82,28 +82,24 @@ pub async fn enable(
 /// Checks (in order):
 /// 1. Config is in replica mode
 /// 2. Remote memory count is 0 (unless force)
-/// 3. `.memso/memory.db` exists (the natural backup left in place by `remote enable`)
+/// 3. local memory.db exists (the natural backup left in place by `remote enable`)
 pub async fn sync(config: &Config, force: bool) -> Result<String> {
-    if !matches!(
-        (&config.backend.mode, &config.backend.remote_mode),
-        (BackendMode::Remote, RemoteMode::Replica)
-    ) {
+    let s = &config.memory.storage;
+    if !matches!((&s.mode, &s.remote_mode), (StorageMode::Remote, RemoteMode::Replica)) {
         return Ok(
-            "Not in remote/replica mode. Run `memso remote enable` first to configure cloud sync."
+            "Not in remote/replica mode. Run `tyto remote enable` first to configure cloud sync."
                 .to_string(),
         );
     }
 
-    let url = config
-        .backend
+    let url = s
         .remote_url
         .as_deref()
-        .context("remote replica mode requires backend.remote_url")?;
-    let token = config
-        .backend
-        .auth_token
+        .context("remote replica mode requires memory.remote_url")?;
+    let token = s
+        .remote_auth_token
         .as_deref()
-        .context("remote replica mode requires backend.auth_token (set MEMSO_BACKEND__AUTH_TOKEN)")?;
+        .context("remote replica mode requires memory.remote_auth_token (set TYTO__MEMORY__REMOTE_AUTH_TOKEN)")?;
 
     let local_path = config.local_db_path();
     if !local_path.exists() {
@@ -287,7 +283,7 @@ fn update_config(config: &Config, remote_url: &str) -> Result<()> {
     let config_path = config
         .source_path
         .clone()
-        .unwrap_or_else(|| config.project_root.join(".memso.toml"));
+        .unwrap_or_else(|| config.project_root.join(".tyto.toml"));
 
     let existing = if config_path.exists() {
         std::fs::read_to_string(&config_path)
@@ -301,9 +297,9 @@ fn update_config(config: &Config, remote_url: &str) -> Result<()> {
         .parse()
         .with_context(|| format!("Failed to parse {}", config_path.display()))?;
 
-    doc["backend"]["mode"] = toml_edit::value("remote");
-    doc["backend"]["remote_mode"] = toml_edit::value("replica");
-    doc["backend"]["remote_url"] = toml_edit::value(remote_url);
+    doc["memory"]["mode"] = toml_edit::value("remote");
+    doc["memory"]["remote_mode"] = toml_edit::value("replica");
+    doc["memory"]["remote_url"] = toml_edit::value(remote_url);
 
     std::fs::write(&config_path, doc.to_string())
         .with_context(|| format!("Failed to write {}", config_path.display()))?;

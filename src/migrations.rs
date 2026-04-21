@@ -190,7 +190,7 @@ async fn validate_checksum(conn: &Connection, migration: &Migration) -> Result<(
     let current = sha256(migration.sql);
     if stored != current {
         eprintln!(
-            "[memso] WARNING: migration '{}' checksum mismatch (stored={}, current={}). \
+            "[tyto] WARNING: migration '{}' checksum mismatch (stored={}, current={}). \
              The migration file was modified after it was applied.",
             migration.name, stored, current
         );

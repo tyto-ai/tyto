@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const MCP_SERVER_NAME: &str = "memso";
+const MCP_SERVER_NAME: &str = "tyto";
 
 fn hook_cmd(bin: &str, suffix: &str) -> String {
     format!("{bin} {suffix}")
@@ -20,7 +20,7 @@ pub struct InstallResult {
 
 pub fn run(dry_run: bool) -> Result<InstallResult> {
     let binary_path = std::env::current_exe()
-        .context("Could not determine path to memso binary")?;
+        .context("Could not determine path to tyto binary")?;
     let bin = binary_path.to_string_lossy();
 
     let path = settings_path()?;
@@ -50,7 +50,7 @@ pub fn run(dry_run: bool) -> Result<InstallResult> {
     })
 }
 
-/// Ensure `mcpServers.memso` exists with the correct command and args.
+/// Ensure `mcpServers.tyto` exists with the correct command and args.
 /// Returns true if a change was made.
 fn ensure_mcp_server(root: &mut Value, binary_path: &Path) -> Result<bool> {
     let cmd = binary_path.to_string_lossy();
@@ -153,19 +153,19 @@ mod tests {
     #[test]
     fn ensure_mcp_server_adds_when_absent() {
         let mut root = json!({});
-        let bin = Path::new("/usr/local/bin/memso");
+        let bin = Path::new("/usr/local/bin/tyto");
         let changed = ensure_mcp_server(&mut root, bin).unwrap();
         assert!(changed);
-        assert_eq!(root["mcpServers"]["memso"]["command"], "/usr/local/bin/memso");
-        assert_eq!(root["mcpServers"]["memso"]["args"], json!(["serve"]));
+        assert_eq!(root["mcpServers"]["tyto"]["command"], "/usr/local/bin/tyto");
+        assert_eq!(root["mcpServers"]["tyto"]["args"], json!(["serve"]));
     }
 
     #[test]
     fn ensure_mcp_server_skips_when_correct() {
         let mut root = json!({
-            "mcpServers": {"memso": {"type": "stdio", "command": "/usr/local/bin/memso", "args": ["serve"]}}
+            "mcpServers": {"tyto": {"type": "stdio", "command": "/usr/local/bin/tyto", "args": ["serve"]}}
         });
-        let bin = Path::new("/usr/local/bin/memso");
+        let bin = Path::new("/usr/local/bin/tyto");
         let changed = ensure_mcp_server(&mut root, bin).unwrap();
         assert!(!changed);
     }
@@ -173,18 +173,18 @@ mod tests {
     #[test]
     fn ensure_mcp_server_fixes_wrong_args() {
         let mut root = json!({
-            "mcpServers": {"memso": {"type": "stdio", "command": "/usr/local/bin/memso", "args": ["wrong"]}}
+            "mcpServers": {"tyto": {"type": "stdio", "command": "/usr/local/bin/tyto", "args": ["wrong"]}}
         });
-        let bin = Path::new("/usr/local/bin/memso");
+        let bin = Path::new("/usr/local/bin/tyto");
         let changed = ensure_mcp_server(&mut root, bin).unwrap();
         assert!(changed, "should overwrite when args are wrong");
-        assert_eq!(root["mcpServers"]["memso"]["args"], json!(["serve"]));
+        assert_eq!(root["mcpServers"]["tyto"]["args"], json!(["serve"]));
     }
 
     #[test]
     fn ensure_hook_adds_when_absent() {
         let mut root = json!({});
-        let changed = ensure_hook(&mut root, "SessionStart", "memso inject --type session").unwrap();
+        let changed = ensure_hook(&mut root, "SessionStart", "tyto inject --type session").unwrap();
         assert!(changed);
         let hooks = root["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn ensure_hook_skips_when_present() {
-        let cmd = "memso inject --type session";
+        let cmd = "tyto inject --type session";
         let mut root = json!({
             "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]}
         });

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use libsql::{Builder, Connection, Database};
 use std::path::Path;
 
-use crate::{config::{BackendMode, RemoteMode, Config}, mlog};
+use crate::{config::{StorageMode, RemoteMode, Config}, mlog};
 
 pub struct Db {
     pub conn: Connection,
@@ -11,8 +11,9 @@ pub struct Db {
 
 impl Db {
     pub async fn open(config: &Config) -> Result<Self> {
-        let db = match config.backend.mode {
-            BackendMode::Local => {
+        let s = &config.memory.storage;
+        let db = match s.mode {
+            StorageMode::Managed | StorageMode::Local | StorageMode::Disabled => {
                 let path = config.db_path();
                 ensure_parent_dir(&path)?;
                 Builder::new_local(&path)
@@ -20,20 +21,18 @@ impl Db {
                     .await
                     .with_context(|| format!("Failed to open local DB at {}", path.display()))?
             }
-            BackendMode::Remote => {
-                let url = config
-                    .backend
+            StorageMode::Remote => {
+                let url = s
                     .remote_url
                     .as_deref()
-                    .context("remote mode requires backend.remote_url")?;
-                let token = config
-                    .backend
-                    .auth_token
+                    .context("remote mode requires memory.remote_url")?;
+                let token = s
+                    .remote_auth_token
                     .as_deref()
-                    .context("remote mode requires backend.auth_token")?;
-                match config.backend.remote_mode {
+                    .context("remote mode requires memory.remote_auth_token")?;
+                match s.remote_mode {
                     RemoteMode::Direct => {
-                        // No local file for direct mode; ensure .memso/ directory exists for
+                        // No local file for direct mode; ensure the managed dir exists for
                         // serve.lock, serve.ready, and crash.log.
                         ensure_parent_dir(&config.db_path())?;
                         Builder::new_remote(url.to_string(), token.to_string())
@@ -60,7 +59,7 @@ impl Db {
         // Enable WAL mode and a generous busy timeout for local mode only.
         // WAL allows concurrent readers while a writer holds the lock; busy_timeout
         // makes writers retry for up to 5s instead of immediately returning SQLITE_BUSY.
-        // This makes local mode safe for multiple concurrent memso processes (e.g.
+        // This makes local mode safe for multiple concurrent tyto processes (e.g.
         // multiple agents or IDE windows on the same project).
         //
         // Skipped for replica mode: the local replica file is managed by libsql's
@@ -69,7 +68,7 @@ impl Db {
         // Known gap: the in-process WriteLock dedup guard does not extend across
         // processes, so concurrent agents may occasionally write duplicate memories.
         // Acceptable for v1; a shared-lock or daemon model can address this later.
-        if matches!(config.backend.mode, BackendMode::Local) {
+        if matches!(s.mode, StorageMode::Managed | StorageMode::Local) {
             conn.execute_batch(
                 "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"
             )
@@ -108,7 +107,7 @@ impl Db {
 ///
 /// TODO: surface this state to the user more gracefully:
 ///   - Detect "replica missing after previous crash" and emit a clear message.
-///   - Consider a `memso remote reset` command that purges local replica files
+///   - Consider a `tyto remote reset` command that purges local replica files
 ///     and forces a clean re-sync, giving the user a self-service recovery path.
 ///   - Track whether the last open was a fresh sync vs incremental to give
 ///     better timeout/progress feedback.
@@ -130,7 +129,7 @@ async fn open_replica_with_recovery(
             // Replica files (`memory.replica.db`) are distinct from local-mode files
             // (`memory.db`), so purging is always safe - there is no risk of deleting
             // the user's local database. The remote is the source of truth.
-            mlog!("memso: replica open failed ({first_err:#}), purging local files and retrying...");
+            mlog!("tyto: replica open failed ({first_err:#}), purging local files and retrying...");
             purge_replica_files(path)?;
             build()
                 .await

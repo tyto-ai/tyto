@@ -1,22 +1,25 @@
 use anyhow::Result;
 use libsql::params;
 
-use crate::{config::Config, db::Db, migrations, project_id};
+use crate::{config::{Config, StorageMode}, db::Db, migrations, project_id};
 
 pub async fn run(config: &Config) -> Result<()> {
-    let pid = project_id::resolve(&config.project_root, config.memory.project_id.as_deref());
+    let pid = project_id::resolve(&config.project_root, config.project_id.as_deref());
 
     let db = Db::open(config).await?;
     let conn = db.conn;
     migrations::run(&conn).await?;
 
     let db_path = config.db_path();
-    let mode = match config.backend.mode {
-        crate::config::BackendMode::Local => "local".to_string(),
-        crate::config::BackendMode::Remote => format!(
+    let s = &config.memory.storage;
+    let mode = match s.mode {
+        StorageMode::Managed => "managed".to_string(),
+        StorageMode::Local => "local".to_string(),
+        StorageMode::Remote => format!(
             "remote/{}",
-            format!("{:?}", config.backend.remote_mode).to_lowercase()
+            format!("{:?}", s.remote_mode).to_lowercase()
         ),
+        StorageMode::Disabled => "disabled".to_string(),
     };
 
     let total: i64 = conn
@@ -48,7 +51,7 @@ pub async fn run(config: &Config) -> Result<()> {
         .await?
         .and_then(|r| r.get::<String>(0).ok());
 
-    println!("memso v{}", env!("CARGO_PKG_VERSION"));
+    println!("tyto v{}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("project:      {pid}");
     println!("backend:      {mode}");
@@ -62,14 +65,14 @@ pub async fn run(config: &Config) -> Result<()> {
         println!("last stored:  never");
     }
 
-    if matches!(config.backend.mode, crate::config::BackendMode::Remote) {
-        match &config.backend.remote_url {
+    if matches!(s.mode, StorageMode::Remote) {
+        match &s.remote_url {
             Some(url) => println!("remote:       {url}"),
             None => println!("remote:       (not configured)"),
         }
     } else {
         println!();
-        println!("tip: run 'memso install' to configure Claude Code integration");
+        println!("tip: run 'tyto install' to configure Claude Code integration");
     }
 
     Ok(())
