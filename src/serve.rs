@@ -26,6 +26,7 @@ use crate::{
     config::Config,
     db::Db,
     embed::Embedder,
+    index,
     migrations,
     project_id,
     retrieve,
@@ -52,6 +53,7 @@ enum DbState {
 #[derive(Clone)]
 struct MemsoServer {
     db: tokio::sync::watch::Receiver<DbState>,
+    idx: tokio::sync::watch::Receiver<index::IndexState>,
     write_lock: WriteLock,
     session_id: String,
     project_id: String,
@@ -74,6 +76,19 @@ impl MemsoServer {
             ),
             DbState::Ready(r) => Ok(Arc::clone(r)),
             DbState::Failed(msg) => Err(format!("memso database initialisation failed: {msg}")),
+        }
+    }
+
+    fn try_index_ready(&self) -> Result<Arc<index::IndexReady>, String> {
+        match &*self.idx.borrow() {
+            index::IndexState::Opening => Err(
+                "Code index is initializing, please retry in a moment.".to_string()
+            ),
+            index::IndexState::Ready(r) => Ok(Arc::clone(r)),
+            index::IndexState::Disabled => Err(
+                "Code indexing is disabled. Set [index] enabled = true in .memso.toml to enable.".to_string()
+            ),
+            index::IndexState::Failed(msg) => Err(format!("Code index failed: {msg}")),
         }
     }
 }
@@ -231,6 +246,56 @@ struct CaptureNoteInput {
 }
 
 fn default_capture_context() -> String { "note".to_string() }
+
+// --- Code intelligence tool input schemas ---
+
+#[serde_as]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchCodeInput {
+    /// Natural language query describing the code you are looking for.
+    query: String,
+    /// Maximum results to return (default 10).
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<usize>")]
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetSymbolInput {
+    /// Symbol name or qualified path to look up (e.g. "validate_jwt_token" or "Auth::validate").
+    name: String,
+    /// Optional file path to narrow the search (e.g. "src/auth.rs").
+    #[serde(default)]
+    file_path: Option<String>,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListHotspotsInput {
+    /// Minimum number of commits touching a symbol to include (default 2).
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<i64>")]
+    #[serde(default)]
+    min_churn: Option<i64>,
+    /// Maximum results to return (default 20).
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<usize>")]
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchInput {
+    /// Natural language query to search across memories and source code simultaneously.
+    query: String,
+    /// Maximum results per source to return (default 5).
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[schemars(with = "Option<usize>")]
+    #[serde(default)]
+    limit: Option<usize>,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SeedCloudInput {
@@ -483,6 +548,133 @@ impl MemsoServer {
             Err(e) => Err(format!("evict_stale_memories failed: {e}")),
         }
     }
+
+    // --- Code intelligence tools ---
+
+    #[tool(description = "Search source code and git history only, without memory results. Use when specifically looking for code references or callers and memory results would add noise.")]
+    async fn search_code(&self, Parameters(input): Parameters<SearchCodeInput>) -> Result<String, String> {
+        let db_ready = self.try_ready()?;
+        let idx = self.try_index_ready()?;
+        let limit = input.limit.unwrap_or(10);
+
+        let embedding = {
+            let mut e = db_ready.embedder.lock().await;
+            e.embed(&input.query).map_err(|e| format!("embed failed: {e}"))?
+        };
+
+        let results = index::search::search_code(&idx.conn, embedding, &input.query, limit)
+            .await
+            .map_err(|e| format!("search_code failed: {e}"))?;
+
+        if results.is_empty() {
+            return Ok("No matching code found.".to_string());
+        }
+
+        let mut out = String::new();
+        for r in &results {
+            out.push_str(&index::search::format_result(r, true));
+            out.push_str("---\n");
+        }
+        Ok(out)
+    }
+
+    #[tool(description = "Look up a specific symbol by name. Returns all matching functions, structs, classes, or methods. Supply file_path to narrow to one file when the name is ambiguous.")]
+    async fn get_symbol(&self, Parameters(input): Parameters<GetSymbolInput>) -> Result<String, String> {
+        let idx = self.try_index_ready()?;
+        let results = index::search::get_symbol(
+            &idx.conn,
+            &input.name,
+            input.file_path.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("get_symbol failed: {e}"))?;
+
+        if results.is_empty() {
+            return Ok(format!("Symbol '{}' not found in the index.", input.name));
+        }
+
+        let mut out = String::new();
+        for r in &results {
+            out.push_str(&index::search::format_result(r, true));
+            out.push_str("---\n");
+        }
+        Ok(out)
+    }
+
+    #[tool(description = "List the most-frequently-changed symbols in the codebase (highest commit churn). Useful for identifying volatile or problematic areas.")]
+    async fn list_hotspots(&self, Parameters(input): Parameters<ListHotspotsInput>) -> Result<String, String> {
+        let idx = self.try_index_ready()?;
+        let min_churn = input.min_churn.unwrap_or(2);
+        let limit = input.limit.unwrap_or(20);
+
+        let results = index::search::list_hotspots(&idx.conn, min_churn, limit)
+            .await
+            .map_err(|e| format!("list_hotspots failed: {e}"))?;
+
+        if results.is_empty() {
+            return Ok(format!("No symbols with >= {min_churn} commits found."));
+        }
+
+        let mut out = format!("Top {} hotspots (min_churn={}):\n\n", results.len(), min_churn);
+        for r in &results {
+            out.push_str(&index::search::format_result(r, false));
+            out.push_str("---\n");
+        }
+        Ok(out)
+    }
+
+    #[tool(description = "Search memories, source code, and git history simultaneously. Use this by default. Returns memory results and code results in separate sections.")]
+    async fn search(&self, Parameters(input): Parameters<SearchInput>) -> Result<String, String> {
+        let db_ready = self.try_ready()?;
+        let limit = input.limit.unwrap_or(5);
+
+        let embedding = {
+            let mut e = db_ready.embedder.lock().await;
+            e.embed(&input.query).map_err(|e| format!("embed failed: {e}"))?
+        };
+
+        // Memory search
+        let memory_results = retrieve::search(
+            &db_ready.conn,
+            embedding.clone(),
+            &input.query,
+            &self.project_id,
+            limit,
+        )
+        .await
+        .unwrap_or_default();
+
+        // Code search (best-effort: don't fail the whole search if index not ready)
+        let code_results = if let Ok(idx) = self.try_index_ready() {
+            index::search::search_code(&idx.conn, embedding, &input.query, limit)
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let mut out = String::new();
+
+        if !memory_results.is_empty() {
+            out.push_str("=== Memories ===\n");
+            out.push_str(&crate::format::compact(&memory_results, 0, None));
+            out.push('\n');
+        }
+
+        if !code_results.is_empty() {
+            out.push_str("=== Code ===\n");
+            for r in &code_results {
+                out.push_str(&index::search::format_result(r, true));
+                out.push_str("---\n");
+            }
+        }
+
+        if out.is_empty() {
+            out = "No results found.".to_string();
+        }
+
+        Ok(out)
+    }
 }
 
 #[tool_handler]
@@ -492,7 +684,7 @@ impl ServerHandler for MemsoServer {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().enable_prompts().build())
             .with_server_info(Implementation::new("memso", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Persistent memory across sessions. \
+                "Persistent memory and code intelligence across sessions. \
                  Store every decision, discovery, gotcha, failure, and unexpected outcome - \
                  use importance (0.0-1.0) to signal value, not omission. \
                  Failures and unexpected outcomes: type='gotcha', importance >= 0.8. \
@@ -505,10 +697,11 @@ impl ServerHandler for MemsoServer {
                  store_memories = facts you would want to search for today or in a future session. \
                  They are not interchangeable. \
                  Set source='reviewed' when storing memories during session-start review. \
-                 Tools: store_memories(memories:[{content,type,title,[topic_key,importance,tags,facts,source,pinned]}]) | \
-                 search_memory(query,[limit,detail]) | get_memories(ids) | \
-                 list_memories([type,tags,limit,detail]) | capture_note(summary,[context]) | \
-                 pin_memories(ids,pin) | delete_memories(ids) | remote_sync() | session_context()",
+                 CODE SEARCH: Use search(query) by default to search memories AND code simultaneously. \
+                 Use search_code(query) only when you specifically want code/git results without memory noise. \
+                 Use get_symbol(name) for exact symbol lookup. Use list_hotspots() to find volatile code areas. \
+                 Memory tools: store_memories | search_memory | get_memories | list_memories | capture_note | pin_memories | delete_memories | remote_sync | session_context. \
+                 Code tools: search(query) | search_code(query) | get_symbol(name,[file_path]) | list_hotspots([min_churn])",
             )
     }
 }
@@ -667,9 +860,11 @@ async fn serve_no_config(config: Config) -> Result<()> {
     // will return the no-config message via try_ready(). The watch sender is kept
     // alive for the duration so the state never changes.
     let (_db_tx, db_rx) = tokio::sync::watch::channel(DbState::Failed(no_config_msg));
+    let (_idx_tx, idx_rx) = tokio::sync::watch::channel(index::IndexState::Disabled);
 
     let server = MemsoServer {
         db: db_rx,
+        idx: idx_rx,
         write_lock: store::new_write_lock(),
         session_id: Uuid::new_v4().to_string(),
         project_id: suggested,
@@ -689,8 +884,9 @@ async fn serve_no_config(config: Config) -> Result<()> {
 }
 
 async fn serve_inner(config: Config, project_id: String) -> Result<()> {
-    // Set up the watch channel: None = syncing, Some = ready or failed.
+    // Set up watch channels for memory DB and code index.
     let (db_tx, db_rx) = tokio::sync::watch::channel(DbState::Syncing);
+    let (idx_tx, idx_rx) = tokio::sync::watch::channel(index::IndexState::Opening);
     let mut db_rx_monitor = db_rx.clone();
 
     // Acquire an exclusive lock on serve.lock for this process's entire lifetime.
@@ -713,9 +909,10 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
 
     let server = MemsoServer {
         db: db_rx,
+        idx: idx_rx,
         write_lock: store::new_write_lock(),
         session_id,
-        project_id,
+        project_id: project_id.clone(),
         config: Arc::new(config.clone()),
         tool_router: MemsoServer::tool_router(),
         prompt_router: MemsoServer::prompt_router(),
@@ -726,18 +923,57 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     let service = server.serve(stdio()).await?;
     mlog!("memso: ready (syncing database in background)");
 
-    // Spawn background task: open DB, run migrations, load embedder.
+    // Spawn background task: open memory DB, run migrations, load embedder.
+    // Once ready, also start the code indexer as a nested background task.
     let ready_file_bg = ready_file.clone();
+    let config_for_idx = config.clone();
+    let project_id_for_idx = project_id.clone();
     tokio::spawn(async move {
         match init_db_and_embedder(&config).await {
             Ok(ready) => {
+                let embedder_for_idx = Arc::clone(&ready.embedder);
                 let _ = db_tx.send(DbState::Ready(Arc::new(ready)));
                 let _ = std::fs::write(&ready_file_bg, "");
                 mlog!("memso: database ready");
+
+                // Start code intelligence indexer (non-blocking: failures don't affect memory)
+                if config_for_idx.index.enabled {
+                    let db_path = config_for_idx.index_db_path(&project_id_for_idx);
+                    let project_root = config_for_idx.project_root.clone();
+                    let git_history = config_for_idx.index.git_history;
+                    let extra_excludes = config_for_idx.index.exclude.clone();
+                    tokio::spawn(async move {
+                        mlog!("memso: opening code index at {}", db_path.display());
+                        match index::open(&db_path, project_root.clone(), git_history, Arc::clone(&embedder_for_idx)).await {
+                            Ok(idx_ready) => {
+                                let idx_ready = Arc::new(idx_ready);
+                                let _ = idx_tx.send(index::IndexState::Ready(Arc::clone(&idx_ready)));
+                                mlog!("memso: code index ready, starting background indexing...");
+                                let conn = Arc::clone(&idx_ready.conn);
+                                let emb = Arc::clone(&embedder_for_idx);
+                                match index::indexer::run(project_root, conn, emb, git_history, extra_excludes).await {
+                                    Ok(r) => mlog!(
+                                        "memso: code index complete — {} files, {} chunks",
+                                        r.files_indexed, r.chunks_stored
+                                    ),
+                                    Err(e) => mlog!("memso: code index run failed: {e:#}"),
+                                }
+                            }
+                            Err(e) => {
+                                mlog!("memso: code index open failed: {e:#}");
+                                let _ = idx_tx.send(index::IndexState::Failed(format!("{e:#}")));
+                            }
+                        }
+                    });
+                } else {
+                    let _ = idx_tx.send(index::IndexState::Disabled);
+                    mlog!("memso: code indexing disabled in config");
+                }
             }
             Err(e) => {
                 mlog!("memso: database init failed: {e:#}");
                 let _ = db_tx.send(DbState::Failed(format!("{e:#}")));
+                let _ = idx_tx.send(index::IndexState::Disabled);
             }
         }
     });
