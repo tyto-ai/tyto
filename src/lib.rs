@@ -1,5 +1,6 @@
 pub mod config;
 pub mod db;
+pub mod index;
 pub mod log;
 pub mod embed;
 pub mod format;

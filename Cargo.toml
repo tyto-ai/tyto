@@ -64,7 +64,13 @@ hex = "0.4"
 dirs = "6"
 fs4 = "0.13.1"
 
+# Code intelligence: AST parsing
+tree-sitter = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
 
+# Code intelligence: gitignore-aware file walking
+ignore = "0.4"
 
 [profile.release]
 strip = true

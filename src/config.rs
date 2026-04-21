@@ -49,12 +49,35 @@ pub struct MemoryConfig {
     pub project_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct IndexConfig {
+    /// Set false to disable code indexing entirely.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Include git commit history for churn analysis.
+    #[serde(default = "default_true")]
+    pub git_history: bool,
+    /// Additional glob patterns to exclude from indexing (merged with built-in excludes).
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+fn default_true() -> bool { true }
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self { enabled: true, git_history: true, exclude: vec![] }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub backend: BackendConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub index: IndexConfig,
     /// Path the project config (`.memso.toml`) was loaded from, if any.
     /// Used only for `toml_edit` writes -- not for path derivation.
     #[serde(skip)]
@@ -148,6 +171,19 @@ impl Config {
     /// source/seed database - it is the natural backup after switching to replica mode.
     pub fn local_db_path(&self) -> PathBuf {
         self.project_root.join(".memso").join("memory.db")
+    }
+
+    /// Path to the code intelligence index database, stored outside the project directory
+    /// in the platform data dir so it never appears in git status.
+    /// Linux:   ~/.local/share/memso/{project_id}/index.db
+    /// macOS:   ~/Library/Application Support/memso/{project_id}/index.db
+    /// Windows: %APPDATA%\memso\{project_id}\index.db
+    pub fn index_db_path(&self, project_id: &str) -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local").join("share"))
+            .join("memso")
+            .join(project_id)
+            .join("index.db")
     }
 }
 
