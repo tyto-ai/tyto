@@ -19,7 +19,7 @@
 #   The binary is re-downloaded only when the remote SHA changes.
 set -uo pipefail
 
-TYTO_VERSION="0.4.0"
+TYTO_VERSION="0.5.0"
 PLUGIN_VERSION="1"
 COMPOSITE="${TYTO_VERSION}-${PLUGIN_VERSION}"
 
