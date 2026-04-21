@@ -1,4 +1,4 @@
-# Contributing to memso
+# Contributing to tyto
 
 Thank you for your interest in contributing.
 

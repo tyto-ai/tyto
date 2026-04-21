@@ -1,11 +1,11 @@
 # Memory
 
-You have persistent memory via the memso MCP server.
+You have persistent memory via the tyto MCP server.
 
 Search: call search_memory before starting significant tasks or when entering
 an unfamiliar area of the codebase.
 
-Store: call store_memory for non-obvious decisions, gotchas, recurring fixes,
+Store: call store_memories for non-obvious decisions, gotchas, recurring fixes,
 and user preferences. Do not store obvious facts or things in the code.
 
 Types: decision | gotcha | problem-solution | how-it-works | what-changed |

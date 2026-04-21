@@ -42,19 +42,19 @@ jobs:
         include:
           - os: ubuntu-latest       # Linux x86_64 (most common deployment target)
             target: x86_64-unknown-linux-gnu
-            binary: memso
+            binary: tyto
           - os: macos-latest        # Apple Silicon (arm64)
             target: aarch64-apple-darwin
-            binary: memso
+            binary: tyto
           - os: ubuntu-24.04-arm   # Linux ARM64 (Graviton, Raspberry Pi, etc.)
             target: aarch64-unknown-linux-gnu
-            binary: memso
+            binary: tyto
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: memso.exe
+            binary: tyto.exe
           - os: windows-latest      # Copilot+ PCs / Snapdragon X - cross-compile from x86_64
             target: aarch64-pc-windows-msvc
-            binary: memso.exe
+            binary: tyto.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +72,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: memso-debug-${{ matrix.target }}
+          name: tyto-debug-${{ matrix.target }}
           path: target/${{ matrix.target }}/debug/${{ matrix.binary }}
           retention-days: 30

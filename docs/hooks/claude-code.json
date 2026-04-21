@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type session --budget 32000"
+            "command": "tyto inject --type session --budget 32000"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type prompt --budget 32000"
+            "command": "tyto inject --type prompt --budget 32000"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso capture"
+            "command": "tyto capture"
           }
         ]
       }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type stop --budget 32000"
+            "command": "tyto inject --type stop --budget 32000"
           }
         ]
       }
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "memso inject --type compact --budget 32000"
+            "command": "tyto inject --type compact --budget 32000"
           }
         ]
       }

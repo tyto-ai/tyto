@@ -20,16 +20,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: memso-linux-x86_64.tar.gz
+            artifact: tyto-linux-x86_64.tar.gz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: memso-linux-aarch64.tar.gz
+            artifact: tyto-linux-aarch64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: memso-macos-aarch64.tar.gz
+            artifact: tyto-macos-aarch64.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: memso-windows-x86_64.zip
+            artifact: tyto-windows-x86_64.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -47,11 +47,11 @@ jobs:
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
-        run: tar czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release memso
+        run: tar czf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release tyto
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path target\${{ matrix.target }}\release\memso.exe -DestinationPath ${{ matrix.artifact }}
+        run: Compress-Archive -Path target\${{ matrix.target }}\release\tyto.exe -DestinationPath ${{ matrix.artifact }}
 
       - uses: softprops/action-gh-release@v2
         with:

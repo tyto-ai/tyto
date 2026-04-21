@@ -6,18 +6,18 @@
 cargo install --path .
 ```
 
-This puts `memso` in `~/.cargo/bin/`. Make sure that is in your `$PATH`.
+This puts `tyto` in `~/.cargo/bin/`. Make sure that is in your `$PATH`.
 
 ## 2. Configure Claude Code
 
 ```bash
-memso install
+tyto install
 ```
 
 This adds the MCP server and hooks to `~/.claude/settings.json` automatically.
 It is safe to run multiple times - already-configured entries are skipped.
 
-Use `memso install --dry-run` to preview changes before writing.
+Use `tyto install --dry-run` to preview changes before writing.
 
 Restart Claude Code after running install.
 
@@ -26,37 +26,52 @@ Restart Claude Code after running install.
 Copy the contents of `docs/rules/CLAUDE.md` into your project's CLAUDE.md,
 replacing `<project>` with your project name.
 
-## 4. Optional: enable Turso Cloud sync
+## 4. Per-project scoping
 
-To sync memories across machines, create a `.memso.toml` in your project root:
-
-```toml
-[backend]
-mode = "replica"
-remote_url = "libsql://your-db.turso.io"
-auth_token = "${MEMSO_AUTH_TOKEN}"
-```
-
-Set `MEMSO_AUTH_TOKEN` in your environment (e.g. via `.envrc` with direnv).
-
-Add `.memso.db` to `.gitignore`. The `.memso.toml` can be committed if you
-use the `${ENV_VAR}` form for the token.
-
-## Per-project scoping
-
-memso uses the current working directory basename as the project ID by default.
-To set an explicit ID, add to `.memso.toml`:
+Create a `.tyto.toml` in your project root with a `project_id`:
 
 ```toml
-[memory]
 project_id = "my-project"
 ```
 
-Or set `$MEMSO_PROJECT` in your environment.
+Or set `TYTO__PROJECT_ID` in your environment.
+
+## 5. Optional: enable Turso Cloud sync
+
+To sync memories across machines, add to your `.tyto.toml`:
+
+```toml
+project_id = "my-project"
+
+[memory]
+mode = "remote"
+remote_mode = "replica"
+remote_url = "libsql://your-db.turso.io"
+```
+
+Set `TYTO__MEMORY__REMOTE_AUTH_TOKEN` in your environment (e.g. via `.envrc` with direnv).
+
+The `.tyto.toml` can be committed; keep the auth token in the environment only.
+
+## Memory storage
+
+By default, tyto stores memories in the platform data directory, keyed by project path:
+
+- Linux: `~/.local/share/tyto/managed/-home-user-myproject/memory.db`
+- macOS: `~/Library/Application Support/tyto/managed/-home-user-myproject/memory.db`
+- Windows: `%APPDATA%\tyto\managed\-home-user-myproject\memory.db`
+
+To store in the project directory instead:
+
+```toml
+[memory]
+mode = "local"
+local_path = ".tyto/memory.db"
+```
 
 ## Code intelligence
 
-memso automatically indexes your source code on startup, giving agents four additional tools:
+tyto automatically indexes your source code on startup, giving agents four additional tools:
 
 - `search` — unified search across memories **and** code simultaneously (recommended default)
 - `search_code` — code-only hybrid search (vector + BM25) without memory results
@@ -67,15 +82,16 @@ Indexing runs in the background after startup. Tools return empty results during
 index build and populate as files are processed.
 
 The index database is stored outside the project directory at:
-- Linux/macOS: `~/.local/share/memso/{project_id}/index.db`
-- Windows: `%APPDATA%\memso\{project_id}\index.db`
+- Linux: `~/.local/share/tyto/managed/-home-user-myproject/index.db`
+- macOS: `~/Library/Application Support/tyto/managed/-home-user-myproject/index.db`
+- Windows: `%APPDATA%\tyto\managed\-home-user-myproject\index.db`
 
-To disable indexing or exclude paths, add to `.memso.toml`:
+To disable indexing or exclude paths, add to `.tyto.toml`:
 
 ```toml
 [index]
-enabled = false          # disable entirely
-git_history = false      # skip git commit history (faster on large repos)
+mode = "disabled"    # disable entirely
+git_history = false  # skip git commit history (faster on large repos)
 exclude = [
     "vendor/**",
     "third_party/**",

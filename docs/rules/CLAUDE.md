@@ -1,6 +1,6 @@
 ## Persistent Memory
 
-You have persistent memory across sessions via the memso MCP server.
+You have persistent memory across sessions via the tyto MCP server.
 
 ### Retrieving context
 
@@ -10,11 +10,11 @@ At the start of every session, call:
 Before starting a significant task or when entering an unfamiliar area, call:
   search_memory(query="<relevant topic>")
 
-Call get_memory(id=<id>) to read the full content of any result that looks relevant.
+Call get_memories(ids=[<id>]) to read the full content of any result that looks relevant.
 
 ### Storing memories
 
-Call store_memory when you:
+Call store_memories when you:
 - Learn something non-obvious about this project's architecture or conventions
 - Make or discover an architectural decision or trade-off
 - Find the solution to a non-obvious or recurring problem

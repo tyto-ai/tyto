@@ -5,7 +5,7 @@ name: E2E
 #   2. Serve artifact from a local HTTP server (no GitHub dependency)
 #   3. Run bootstrap.sh cold install - binary absent, version file absent
 #   4. Run bootstrap.sh again - must fast-path (idempotency check)
-#   5. `memso status` smoke test - confirms DB opens and migrations run
+#   5. `tyto status` smoke test - confirms DB opens and migrations run
 #   6. MCP store + search E2E - confirms full read/write pipeline
 
 on:
@@ -26,20 +26,20 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: memso-linux-x86_64.tar.gz
-            binary: memso
+            artifact: tyto-linux-x86_64.tar.gz
+            binary: tyto
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: memso-linux-aarch64.tar.gz
-            binary: memso
+            artifact: tyto-linux-aarch64.tar.gz
+            binary: tyto
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: memso-macos-aarch64.tar.gz
-            binary: memso
+            artifact: tyto-macos-aarch64.tar.gz
+            binary: tyto
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: memso-windows-x86_64.zip
-            binary: memso.exe
+            artifact: tyto-windows-x86_64.zip
+            binary: tyto.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path target\${{ matrix.target }}\release\memso.exe -DestinationPath ${{ matrix.artifact }}
+        run: Compress-Archive -Path target\${{ matrix.target }}\release\tyto.exe -DestinationPath ${{ matrix.artifact }}
 
       # Create a directory tree that mirrors the GitHub Releases URL pattern so
       # bootstrap.sh with MEMSO_RELEASES_BASE=http://localhost:8787 can fetch it.
@@ -130,7 +130,7 @@ jobs:
         run: |
           SMOKE_DIR="$RUNNER_TEMP/smoke"
           mkdir -p "$SMOKE_DIR"
-          printf '[memory]\nproject_id = "e2e-smoke"\n' > "$SMOKE_DIR/.memso.toml"
+          printf 'project_id = "e2e-smoke"\n' > "$SMOKE_DIR/.tyto.toml"
           cd "$SMOKE_DIR"
           "$RUNNER_TEMP/plugin-data/${{ matrix.binary }}" status
 

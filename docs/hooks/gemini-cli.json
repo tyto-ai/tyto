@@ -2,12 +2,12 @@
   "hooks": {
     "SessionStart": [
       {
-        "command": "memso inject --type session"
+        "command": "tyto inject --type session"
       }
     ],
     "BeforeAgent": [
       {
-        "command": "memso inject --type prompt --budget 8000"
+        "command": "tyto inject --type prompt --budget 8000"
       }
     ]
   }
