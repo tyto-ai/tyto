@@ -28,7 +28,7 @@ serde_json = "1"
 # In-place TOML editing that preserves comments and formatting
 toml_edit = "0.22"
 
-# Layered configuration: file < env vars, with automatic MEMSO_SECTION_FIELD mapping
+# Layered configuration: file < env vars, with automatic TYTO__SECTION__FIELD mapping
 figment = { version = "0.10", features = ["toml", "env"] }
 
 # UUIDs for session_id and memory IDs

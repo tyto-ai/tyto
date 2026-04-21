@@ -1,0 +1,6 @@
+project_id = "tyto"
+
+[memory]
+mode = "remote"
+remote_mode = "direct"
+remote_url = "libsql://memory-memso-beefsack.aws-ap-northeast-1.turso.io"
