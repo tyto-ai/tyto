@@ -2,7 +2,7 @@
 """
 Deterministic tests for inject loading/ready state behaviour.
 
-Does NOT start memso serve. Instead it manipulates serve.lock and serve.ready
+Does NOT start tyto serve. Instead it manipulates serve.lock and serve.ready
 directly, so the tests are non-flaky regardless of how fast the model loads.
 
 Tests:
@@ -23,7 +23,7 @@ TIMEOUT_S = 2.0  # inject must return within this many seconds
 
 
 def run_inject(binary, cwd):
-    """Run memso inject --type session and return (stdout, elapsed_seconds)."""
+    """Run tyto inject --type session and return (stdout, elapsed_seconds)."""
     t0 = time.monotonic()
     result = subprocess.run(
         [binary, "inject", "--type", "session"],
@@ -67,13 +67,16 @@ def main():
             import fcntl
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                memso_dir = os.path.join(tmpdir, ".memso")
-                os.makedirs(memso_dir)
+                tyto_dir = os.path.join(tmpdir, ".tyto")
+                os.makedirs(tyto_dir)
 
-                with open(os.path.join(tmpdir, ".memso.toml"), "w") as f:
-                    f.write('[memory]\nproject_id = "inject-state-test"\n')
+                # mode=local forces serve.lock/serve.ready into .tyto/ inside
+                # the tmpdir, making the path predictable regardless of platform.
+                with open(os.path.join(tmpdir, ".tyto.toml"), "w") as f:
+                    f.write('project_id = "inject-state-test"\n'
+                            '[memory]\nmode = "local"\nlocal_path = ".tyto/memory.db"\n')
 
-                lock_path = os.path.join(memso_dir, "serve.lock")
+                lock_path = os.path.join(tyto_dir, "serve.lock")
                 # serve.ready intentionally absent — this is the Loading state.
 
                 with open(lock_path, "w") as lock_file:
@@ -105,14 +108,15 @@ def main():
     print("Test 2: inject during Ready state")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            memso_dir = os.path.join(tmpdir, ".memso")
-            os.makedirs(memso_dir)
+            tyto_dir = os.path.join(tmpdir, ".tyto")
+            os.makedirs(tyto_dir)
 
-            with open(os.path.join(tmpdir, ".memso.toml"), "w") as f:
-                f.write('[memory]\nproject_id = "inject-state-test"\n')
+            with open(os.path.join(tmpdir, ".tyto.toml"), "w") as f:
+                f.write('project_id = "inject-state-test"\n'
+                        '[memory]\nmode = "local"\nlocal_path = ".tyto/memory.db"\n')
 
             # Write serve.ready — signals that serve is fully up.
-            open(os.path.join(memso_dir, "serve.ready"), "w").close()
+            open(os.path.join(tyto_dir, "serve.ready"), "w").close()
 
             output, elapsed = run_inject(binary, tmpdir)
 

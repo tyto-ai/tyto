@@ -64,13 +64,13 @@ jobs:
         run: Compress-Archive -Path target\${{ matrix.target }}\release\tyto.exe -DestinationPath ${{ matrix.artifact }}
 
       # Create a directory tree that mirrors the GitHub Releases URL pattern so
-      # bootstrap.sh with MEMSO_RELEASES_BASE=http://localhost:8787 can fetch it.
+      # bootstrap.sh with TYTO_RELEASES_BASE=http://localhost:8787 can fetch it.
       # Stable URL shape: /v{VERSION}/{artifact}
       - name: Set up local release server
         shell: bash
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= "\(.*\)"/\1/')
-          echo "MEMSO_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "TYTO_VERSION=${VERSION}" >> "$GITHUB_ENV"
           mkdir -p mock-releases/v${VERSION}
           cp "${{ matrix.artifact }}" mock-releases/v${VERSION}/
           python3 -m http.server 8787 --directory mock-releases &
@@ -89,7 +89,7 @@ jobs:
         env:
           CLAUDE_PLUGIN_DATA: ${{ runner.temp }}/plugin-data
           CLAUDE_PLUGIN_ROOT: ${{ github.workspace }}/agents/claude
-          MEMSO_RELEASES_BASE: http://localhost:8787
+          TYTO_RELEASES_BASE: http://localhost:8787
         run: |
           mkdir -p "$CLAUDE_PLUGIN_DATA"
           bash agents/claude/scripts/bootstrap.sh
@@ -109,7 +109,7 @@ jobs:
         env:
           CLAUDE_PLUGIN_DATA: ${{ runner.temp }}/plugin-data
           CLAUDE_PLUGIN_ROOT: ${{ github.workspace }}/agents/claude
-          MEMSO_RELEASES_BASE: http://localhost:8787
+          TYTO_RELEASES_BASE: http://localhost:8787
         run: |
           out=$(bash agents/claude/scripts/bootstrap.sh 2>&1)
           echo "${out}"
