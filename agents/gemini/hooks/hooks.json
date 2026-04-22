@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "tyto-inject-session",
+            "type": "command",
+            "command": "${extensionPath}/../shared/scripts/tyto.cmd inject --type session"
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "tyto-inject-prompt",
+            "type": "command",
+            "command": "${extensionPath}/../shared/scripts/tyto.cmd inject --type prompt --budget 8000"
+          }
+        ]
+      }
+    ]
+  }
+}
