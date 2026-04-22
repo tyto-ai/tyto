@@ -57,6 +57,9 @@ fn call_args(args: &[String]) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn resolve_binary_path() -> PathBuf {
+    if let Ok(data) = std::env::var("TYTO_PLUGIN_DATA") {
+        return PathBuf::from(data).join(exe("tyto"));
+    }
     if let Ok(data) = std::env::var("CLAUDE_PLUGIN_DATA") {
         return PathBuf::from(data).join(exe("tyto"));
     }
