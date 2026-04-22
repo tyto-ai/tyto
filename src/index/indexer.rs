@@ -199,16 +199,10 @@ pub(crate) async fn index_file(
     let source_clone = source.clone();
     let rel_path_clone = rel_path.clone();
     let lang_name = lang.name().to_string();
-    let chunks: Vec<Chunk> = {
-        let lang_ext = match lang {
-            Lang::Rust => "rs",
-            Lang::Python => "py",
-        };
-        tokio::task::spawn_blocking(move || {
-            let lang = Lang::from_extension(lang_ext).unwrap();
-            parser::parse_file(&source_clone, &rel_path_clone, &lang)
-        }).await?
-    };
+    let lang_copy = *lang;
+    let chunks: Vec<Chunk> = tokio::task::spawn_blocking(move || {
+        parser::parse_file(&source_clone, &rel_path_clone, &lang_copy)
+    }).await?;
 
     if chunks.is_empty() {
         // File is indexed but has no extractable symbols (update hash to avoid re-scanning)

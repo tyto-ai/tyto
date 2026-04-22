@@ -7,73 +7,117 @@ description = "Persistent memory and code intelligence for AI agents, backed by 
 
 [dependencies]
 # MCP stdio transport
-rmcp = { version = "1", features = ["server", "transport-io"] }
+rmcp = { version = "*", features = ["server", "transport-io"] }
 
 # Database - embedded SQLite replica with Turso sync
-libsql = "0.9"
+libsql = "*"
 
 # Local ONNX embeddings (bge-small-en-v1.5)
-fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+fastembed = { version = "*", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "*", features = ["full"] }
 
 # CLI argument parsing
-clap = { version = "4", features = ["derive"] }
+clap = { version = "*", features = ["derive"] }
 
 # Serialisation
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
 
 # In-place TOML editing that preserves comments and formatting
-toml_edit = "0.22"
+toml_edit = "*"
 
 # Layered configuration: file < env vars, with automatic TYTO__SECTION__FIELD mapping
-figment = { version = "0.10", features = ["toml", "env"] }
+figment = { version = "*", features = ["toml", "env"] }
 
 # UUIDs for session_id and memory IDs
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "*", features = ["v4"] }
 
 # Content hash dedup
-sha2 = "0.11"
+sha2 = "*"
 
 # HTTP client for Turso Platform API (setup command)
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+reqwest = { version = "*", features = ["json", "rustls", "blocking"], default-features = false }
+
+# Stub binary: archive extraction for first-install download
+flate2 = "*"
+tar = "*"
+zip = "*"
 
 # JSON schema generation for MCP tool definitions
-schemars = "1"
+schemars = "*"
 
 # Flexible deserialisation: Claude Code's MCP client sends numeric and array params
 # as JSON strings regardless of schema type. serde_with PickFirst + DisplayFromStr
 # accepts both native JSON types and string-encoded values transparently.
-serde_with = { version = "2", features = ["macros", "json"] }
+serde_with = { version = "*", features = ["macros", "json"] }
 
 # Secret sanitization
-regex = "1"
+regex = "*"
 
 # Error handling
-anyhow = "1"
+anyhow = "*"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "*", features = ["serde"] }
 
 # Hex encoding for content hashes
-hex = "0.4"
+hex = "*"
 
 # XDG/platform config and cache directories
-dirs = "6"
-fs4 = "0.13.1"
+dirs = "*"
+fs4 = "*"
 
 # Code intelligence: AST parsing
-tree-sitter = "0.23"
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
+tree-sitter = "*"
+tree-sitter-rust = "*"
+tree-sitter-python = "*"
+tree-sitter-typescript = "*"
+tree-sitter-javascript = "*"
+tree-sitter-go = "*"
+tree-sitter-cpp = "*"
+tree-sitter-java = "*"
+tree-sitter-c = "*"
+tree-sitter-bash = "*"
+tree-sitter-ruby = "*"
+tree-sitter-c-sharp = "*"
+tree-sitter-php = "*"
+tree-sitter-scala = "*"
+tree-sitter-swift = "*"
+tree-sitter-elixir = "*"
+tree-sitter-lua = "*"
+tree-sitter-haskell = "*"
+tree-sitter-nix = "*"
+tree-sitter-solidity = "*"
+tree-sitter-kotlin-ng = "*"
+tree-sitter-ocaml = "*"
+tree-sitter-r = "*"
+tree-sitter-zig = "*"
+tree-sitter-erlang = "*"
+tree-sitter-ql = "*"
+tree-sitter-elm = "*"
+tree-sitter-powershell = "*"
+tree-sitter-dart = "*"
+tree-sitter-objc = "*"
+tree-sitter-tlaplus = "*"
+tree-sitter-css = "*"
+tree-sitter-json = "*"
+tree-sitter-html = "*"
+tree-sitter-yaml = "*"
+tree-sitter-hcl = "*"
+tree-sitter-toml-ng = "*"
+tree-sitter-md = "*"
+tree-sitter-embedded-template = "*"
+tree-sitter-diff = "*"
+tree-sitter-xml = "*"
+tree-sitter-sequel = "*"
 
 # Code intelligence: gitignore-aware file walking
-ignore = "0.4"
+ignore = "*"
 
 # Code intelligence: live file watching for incremental reindex
-notify = { version = "7", features = ["macos_fsevent"] }
+notify = { version = "*", features = ["macos_fsevent"] }
 
 [profile.release]
 strip = true
