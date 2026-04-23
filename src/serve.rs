@@ -272,21 +272,6 @@ struct GetSymbolInput {
 
 #[serde_as]
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ListHotspotsInput {
-    /// Minimum number of commits touching a symbol to include (default 2).
-    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
-    #[schemars(with = "Option<i64>")]
-    #[serde(default)]
-    min_churn: Option<i64>,
-    /// Maximum results to return (default 20).
-    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
-    #[schemars(with = "Option<usize>")]
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[serde_as]
-#[derive(Debug, Deserialize, JsonSchema)]
 struct SearchInput {
     /// Natural language query to search across memories and source code simultaneously.
     query: String,
@@ -570,15 +555,20 @@ impl TytoServer {
             return Ok("No matching code found.".to_string());
         }
 
+        let n = results.len();
         let mut out = String::new();
         for r in &results {
             out.push_str(&index::search::format_result(r, true));
             out.push_str("---\n");
         }
+        out.push_str(&format!(
+            "_meta: {{returned: {n}, truncated: {}}}\n",
+            n >= limit
+        ));
         Ok(out)
     }
 
-    #[tool(description = "Look up a specific symbol by name. Returns all matching functions, structs, classes, or methods. Supply file_path to narrow to one file when the name is ambiguous.")]
+    #[tool(description = "Look up a specific symbol by name. Returns signature, doc, git history for that line range, and cross-type similar results. Supply file_path to narrow when the name is ambiguous.")]
     async fn get_symbol(&self, Parameters(input): Parameters<GetSymbolInput>) -> Result<String, String> {
         let idx = self.try_index_ready()?;
         let results = index::search::get_symbol(
@@ -593,33 +583,75 @@ impl TytoServer {
             return Ok(format!("Symbol '{}' not found in the index.", input.name));
         }
 
+        let n = results.len();
         let mut out = String::new();
+
         for r in &results {
             out.push_str(&index::search::format_result(r, true));
+
+            // Append symbol-level commit history from git log -L (line range tracking)
+            if idx.git_history && r.line_start > 0 {
+                let commits = tokio::task::spawn_blocking({
+                    let root = idx.project_root.clone();
+                    let fp = r.file_path.clone();
+                    let ls = r.line_start as usize;
+                    let le = r.line_end as usize;
+                    move || index::git::symbol_commits(&root, &fp, ls, le, 8)
+                }).await.unwrap_or_default();
+
+                if !commits.is_empty() {
+                    out.push_str(&format!("Recent: {}\n", commits.join("; ")));
+                }
+            }
             out.push_str("---\n");
         }
-        Ok(out)
-    }
 
-    #[tool(description = "List the most-frequently-changed symbols in the codebase (highest commit churn). Useful for identifying volatile or problematic areas.")]
-    async fn list_hotspots(&self, Parameters(input): Parameters<ListHotspotsInput>) -> Result<String, String> {
-        let idx = self.try_index_ready()?;
-        let min_churn = input.min_churn.unwrap_or(2);
-        let limit = input.limit.unwrap_or(20);
+        // Cross-type similar results (best-effort: skip if DB not ready or embed fails)
+        if let Ok(db_ready) = self.try_ready() {
+            let first = &results[0];
+            let embed_text = format!(
+                "{}: {} {}",
+                first.symbol_kind,
+                first.qualified_name,
+                first.signature.as_deref().unwrap_or("")
+            );
+            if let Ok(embedding) = {
+                let mut e = db_ready.embedder.lock().await;
+                e.embed(&embed_text)
+            } {
+                let mem_similar = retrieve::search(
+                    &db_ready.conn, embedding.clone(), &embed_text, &self.project_id, 5
+                ).await.unwrap_or_default();
 
-        let results = index::search::list_hotspots(&idx.conn, min_churn, limit)
-            .await
-            .map_err(|e| format!("list_hotspots failed: {e}"))?;
+                let exclude: std::collections::HashSet<String> =
+                    results.iter().map(|r| r.id.clone()).collect();
+                let code_similar: Vec<_> = index::search::search_code(
+                    &idx.conn, embedding, &embed_text, 10
+                ).await.unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| !exclude.contains(&r.id))
+                    .take(5)
+                    .collect();
 
-        if results.is_empty() {
-            return Ok(format!("No symbols with >= {min_churn} commits found."));
+                if !mem_similar.is_empty() || !code_similar.is_empty() {
+                    out.push_str("similar:\n");
+                    for m in &mem_similar {
+                        out.push_str(&format!(
+                            "  [memory] {}  {}  ~{}c\n",
+                            m.id, m.title, m.content_len
+                        ));
+                    }
+                    for c in &code_similar {
+                        out.push_str(&format!(
+                            "  [symbol] {}  {}:{}-{}\n",
+                            c.qualified_name, c.file_path, c.line_start, c.line_end
+                        ));
+                    }
+                }
+            }
         }
 
-        let mut out = format!("Top {} hotspots (min_churn={}):\n\n", results.len(), min_churn);
-        for r in &results {
-            out.push_str(&index::search::format_result(r, false));
-            out.push_str("---\n");
-        }
+        out.push_str(&format!("_meta: {{returned: {n}}}\n"));
         Ok(out)
     }
 
@@ -670,9 +702,14 @@ impl TytoServer {
         }
 
         if out.is_empty() {
-            out = "No results found.".to_string();
+            return Ok("No results found.".to_string());
         }
 
+        let total = memory_results.len() + code_results.len();
+        let truncated = memory_results.len() >= limit || code_results.len() >= limit;
+        out.push_str(&format!(
+            "_meta: {{returned: {total}, truncated: {truncated}}}\n"
+        ));
         Ok(out)
     }
 }
@@ -699,9 +736,10 @@ impl ServerHandler for TytoServer {
                  Set source='reviewed' when storing memories during session-start review. \
                  CODE SEARCH: Use search(query) by default to search memories AND code simultaneously. \
                  Use search_code(query) only when you specifically want code/git results without memory noise. \
-                 Use get_symbol(name) for exact symbol lookup. Use list_hotspots() to find volatile code areas. \
+                 Use get_symbol(name) for exact symbol lookup — returns signature, git line-range history, hotspot score, and cross-type similar results. \
+                 hotspot_score reflects recent modification frequency (higher = more volatile, treat with more scrutiny). \
                  Memory tools: store_memories | search_memory | get_memories | list_memories | capture_note | pin_memories | delete_memories | remote_sync | session_context. \
-                 Code tools: search(query) | search_code(query) | get_symbol(name,[file_path]) | list_hotspots([min_churn])",
+                 Code tools: search(query) | search_code(query) | get_symbol(name,[file_path])",
             )
     }
 }
