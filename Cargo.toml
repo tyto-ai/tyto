@@ -37,8 +37,8 @@ uuid = { version = "*", features = ["v4"] }
 # Content hash dedup
 sha2 = "*"
 
-# HTTP client for Turso Platform API (setup command)
-reqwest = { version = "*", features = ["json", "rustls", "blocking"], default-features = false }
+# Stub binary: sync HTTP download for first-install bootstrap
+ureq = { version = "*", features = ["rustls"], default-features = false }
 
 # Stub binary: archive extraction for first-install download
 flate2 = "*"

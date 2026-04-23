@@ -18,10 +18,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Dev override: exec directly, pass all args through.
-    if let Ok(p) = std::env::var("TYTO_BINARY_OVERRIDE") {
-        if !p.is_empty() {
-            exec_tyto(Path::new(&p), &call_args(&args));
-        }
+    if let Some(p) = std::env::var("TYTO_BINARY_OVERRIDE").ok().filter(|p| !p.is_empty()) {
+        exec_tyto(Path::new(&p), &call_args(&args));
     }
 
     let bin = resolve_binary_path();
@@ -143,6 +141,7 @@ fn download_with_lock(bin: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let lock_path = bin.parent().unwrap_or(Path::new(".")).join("tyto.download.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)?;
 
@@ -261,11 +260,7 @@ fn download_tyto(bin: &Path) -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let resp = reqwest::blocking::get(&url)?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()).into());
-    }
-    let bytes = resp.bytes()?;
+    let bytes = ureq::get(&url).call()?.body_mut().read_to_vec()?;
 
     let bin_name = exe("tyto");
     let extracted = if cfg!(target_os = "windows") {
