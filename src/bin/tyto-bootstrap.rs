@@ -56,14 +56,15 @@ fn call_args(args: &[String]) -> Vec<String> {
 
 fn resolve_binary_path() -> PathBuf {
     if let Ok(data) = std::env::var("TYTO_PLUGIN_DATA") {
-        return PathBuf::from(data).join(exe("tyto"));
+        return PathBuf::from(data).join(VERSION).join(exe("tyto"));
     }
     if let Ok(data) = std::env::var("CLAUDE_PLUGIN_DATA") {
-        return PathBuf::from(data).join(exe("tyto"));
+        return PathBuf::from(data).join(VERSION).join(exe("tyto"));
     }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("tyto")
+        .join(VERSION)
         .join(exe("tyto"))
 }
 
@@ -75,19 +76,8 @@ fn exe(name: &str) -> String {
     }
 }
 
-fn version_file(bin: &Path) -> PathBuf {
-    bin.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("tyto.version")
-}
-
 fn binary_is_current(bin: &Path) -> bool {
-    if !bin.exists() {
-        return false;
-    }
-    std::fs::read_to_string(version_file(bin))
-        .map(|v| v.trim() == VERSION)
-        .unwrap_or(false)
+    bin.exists()
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +269,6 @@ fn download_tyto(bin: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     std::fs::rename(&tmp, bin)?;
-    std::fs::write(version_file(bin), VERSION)?;
     Ok(())
 }
 
