@@ -365,29 +365,27 @@ const SCALA_QUERY: &str = r#"
 const SWIFT_QUERY: &str = r#"
 (function_declaration name: (simple_identifier) @name) @symbol
 (class_declaration name: (type_identifier) @name) @symbol
-(struct_declaration name: (type_identifier) @name) @symbol
 (protocol_declaration name: (type_identifier) @name) @symbol
 "#;
 
 const ELIXIR_QUERY: &str = r#"
 (call target: (identifier) @_def
-      arguments: (arguments . (identifier) @name)
+      (arguments . (call target: (identifier) @name))
       (#match? @_def "^def(p|macro|macrop)?$")) @symbol
 "#;
 
 const LUA_QUERY: &str = r#"
 (function_declaration name: (identifier) @name) @symbol
-(local_function name: (identifier) @name) @symbol
 "#;
 
 const HASKELL_QUERY: &str = r#"
 (function name: (variable) @name) @symbol
-(data_declaration name: (name) @name) @symbol
-(type_synonym_declaration name: (name) @name) @symbol
+(data_type name: (name) @name) @symbol
+(type_synomym name: (name) @name) @symbol
 "#;
 
 const NIX_QUERY: &str = r#"
-(binding attrpath: (attrpath (identifier) @name) expression: (function)) @symbol
+(binding attrpath: (attrpath (identifier) @name) expression: (function_expression)) @symbol
 "#;
 
 const SOLIDITY_QUERY: &str = r#"
@@ -398,24 +396,23 @@ const SOLIDITY_QUERY: &str = r#"
 "#;
 
 const KOTLIN_QUERY: &str = r#"
-(function_declaration (simple_identifier) @name) @symbol
-(class_declaration (type_identifier) @name) @symbol
-(object_declaration (type_identifier) @name) @symbol
+(function_declaration name: (identifier) @name) @symbol
+(class_declaration name: (identifier) @name) @symbol
+(object_declaration name: (identifier) @name) @symbol
 "#;
 
 const OCAML_QUERY: &str = r#"
 (let_binding pattern: (value_name) @name) @symbol
 (type_definition (type_binding name: (type_constructor) @name)) @symbol
-(module_definition name: (module_name) @name) @symbol
+(module_definition (module_binding (module_name) @name)) @symbol
 "#;
 
 const R_QUERY: &str = r#"
-(left_assignment name: (identifier) @name value: (function_definition)) @symbol
+(binary_operator lhs: (identifier) @name rhs: (function_definition)) @symbol
 "#;
 
 const ZIG_QUERY: &str = r#"
-(fn_decl name: (identifier) @name) @symbol
-(var_decl name: (identifier) @name init: (struct_decl)) @symbol
+(function_declaration name: (identifier) @name) @symbol
 "#;
 
 const ERLANG_QUERY: &str = r#"
@@ -423,8 +420,8 @@ const ERLANG_QUERY: &str = r#"
 "#;
 
 const QL_QUERY: &str = r#"
-(predicate name: (predicate_name) @name) @symbol
-(class_def name: (classname) @name) @symbol
+(classlessPredicate name: (predicateName) @name) @symbol
+(dataclass name: (className) @name) @symbol
 "#;
 
 const ELM_QUERY: &str = r#"
@@ -434,12 +431,12 @@ const ELM_QUERY: &str = r#"
 "#;
 
 const POWERSHELL_QUERY: &str = r#"
-(function_statement name: (user_defined_keyword) @name) @symbol
+(function_statement (function_name) @name) @symbol
 "#;
 
 const DART_QUERY: &str = r#"
 (function_signature name: (identifier) @name) @symbol
-(class_definition name: (identifier) @name) @symbol
+(class_declaration name: (identifier) @name) @symbol
 (mixin_declaration name: (identifier) @name) @symbol
 "#;
 
@@ -450,8 +447,8 @@ const OBJC_QUERY: &str = r#"
 "#;
 
 const TLAPLUS_QUERY: &str = r#"
-(operator_definition name: (identifier_ref) @name) @symbol
-(function_definition name: (identifier_ref) @name) @symbol
+(operator_definition name: (identifier) @name) @symbol
+(function_definition name: (identifier) @name) @symbol
 "#;
 
 // --- Strategy B: Structural queries (extract top-level sections) ---
@@ -973,6 +970,133 @@ fn documented() -> i32 { 0 }
             c.doc_comment.as_deref().unwrap_or("").contains("something useful"),
             "Python docstring should be captured"
         );
+    }
+
+    // --- TypeScript ---
+
+    fn parse_ts(src: &str) -> Vec<Chunk> {
+        parse_file(src, "src/index.ts", &Lang::TypeScript)
+    }
+
+    #[test]
+    fn typescript_function_declaration() {
+        let chunks = parse_ts("function greet(name: string): string { return `hello ${name}`; }");
+        let c = find(&chunks, "greet");
+        assert_eq!(c.symbol_kind, "function");
+        assert_eq!(c.language, "typescript");
+    }
+
+    #[test]
+    fn typescript_class_declaration() {
+        let chunks = parse_ts("class Animal { constructor(public name: string) {} }");
+        let c = find(&chunks, "Animal");
+        assert_eq!(c.symbol_kind, "class");
+    }
+
+    #[test]
+    fn typescript_interface_declaration() {
+        let chunks = parse_ts("interface Flyable { fly(): void; }");
+        let c = find(&chunks, "Flyable");
+        assert_eq!(c.symbol_kind, "interface");
+    }
+
+    #[test]
+    fn typescript_type_alias() {
+        let chunks = parse_ts("type Callback = (err: Error | null) => void;");
+        let c = find(&chunks, "Callback");
+        assert_eq!(c.symbol_kind, "type");
+    }
+
+    #[test]
+    fn typescript_method_in_class() {
+        let src = "class Dog { bark(): string { return 'woof'; } }";
+        let chunks = parse_ts(src);
+        let c = find(&chunks, "bark");
+        assert_eq!(c.symbol_kind, "method");
+    }
+
+    // --- Go ---
+
+    fn parse_go(src: &str) -> Vec<Chunk> {
+        parse_file(src, "main.go", &Lang::Go)
+    }
+
+    #[test]
+    fn go_function_declaration() {
+        let src = "package main\nfunc Greet(name string) string { return \"hello \" + name }\n";
+        let chunks = parse_go(src);
+        let c = find(&chunks, "Greet");
+        assert_eq!(c.symbol_kind, "function");
+        assert_eq!(c.language, "go");
+    }
+
+    #[test]
+    fn go_method_declaration() {
+        let src = "package main\ntype Animal struct{}\nfunc (a *Animal) Speak() string { return \"...\" }\n";
+        let chunks = parse_go(src);
+        let c = find(&chunks, "Speak");
+        assert_eq!(c.symbol_kind, "method");
+    }
+
+    #[test]
+    fn go_type_declaration() {
+        let src = "package main\ntype Config struct { Host string; Port int }\n";
+        let chunks = parse_go(src);
+        let c = find(&chunks, "Config");
+        // Go type declarations are captured at the type_declaration node level, which maps to "type".
+        assert_eq!(c.symbol_kind, "type");
+    }
+
+    // --- JavaScript ---
+
+    fn parse_js(src: &str) -> Vec<Chunk> {
+        parse_file(src, "index.js", &Lang::JavaScript)
+    }
+
+    #[test]
+    fn javascript_function_declaration() {
+        let chunks = parse_js("function greet(name) { return `hello ${name}`; }");
+        let c = find(&chunks, "greet");
+        assert_eq!(c.symbol_kind, "function");
+        assert_eq!(c.language, "javascript");
+    }
+
+    #[test]
+    fn javascript_class_declaration() {
+        let chunks = parse_js("class Animal { constructor(name) { this.name = name; } }");
+        let c = find(&chunks, "Animal");
+        assert_eq!(c.symbol_kind, "class");
+    }
+
+    #[test]
+    fn javascript_method_in_class() {
+        let src = "class Dog { bark() { return 'woof'; } }";
+        let chunks = parse_js(src);
+        let c = find(&chunks, "bark");
+        assert_eq!(c.symbol_kind, "method");
+    }
+
+    // --- All-language query compilation smoke test ---
+
+    #[test]
+    fn all_language_queries_compile() {
+        use tree_sitter::Query;
+        let langs = [
+            Lang::Rust, Lang::Python, Lang::TypeScript, Lang::Tsx, Lang::JavaScript,
+            Lang::Go, Lang::Cpp, Lang::Java, Lang::C, Lang::Bash, Lang::Ruby,
+            Lang::CSharp, Lang::Php, Lang::Scala, Lang::Swift, Lang::Elixir,
+            Lang::Lua, Lang::Haskell, Lang::Nix, Lang::Solidity, Lang::Kotlin,
+            Lang::OCaml, Lang::R, Lang::Zig, Lang::Erlang, Lang::Ql, Lang::Elm,
+            Lang::Powershell, Lang::Dart, Lang::ObjC, Lang::TlaPlus,
+            Lang::Css, Lang::Json, Lang::Html, Lang::Yaml, Lang::Hcl,
+            Lang::Toml, Lang::Markdown, Lang::EmbeddedTemplate, Lang::Diff,
+            Lang::Xml, Lang::Sql,
+        ];
+        for lang in &langs {
+            let ts_lang = lang.tree_sitter_language();
+            Query::new(&ts_lang, lang.query_str())
+                .unwrap_or_else(|e| panic!("Query for {} failed to compile: {e}", lang.name()));
+        }
     }
 
     #[test]
