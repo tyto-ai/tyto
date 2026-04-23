@@ -421,48 +421,52 @@ impl TytoServer {
 
         let mut out = parts.join("\n---\n");
 
-        // Cross-type similar: centroid of stored embeddings, best-effort, no model call.
-        if !memories.is_empty() {
-            if let Ok(embeddings) = retrieve::fetch_embeddings(&ready.conn, &input.ids, &self.project_id).await {
-                if !embeddings.is_empty() {
-                    let dim = embeddings[0].len();
-                    let n = embeddings.len() as f32;
-                    let mut centroid = vec![0.0f32; dim];
-                    for emb in &embeddings {
-                        for (i, v) in emb.iter().enumerate() {
-                            centroid[i] += v;
+        // Cross-type similar: per-vector ANN search, deduplicated by ID, best-effort, no model call.
+        if !memories.is_empty()
+            && let Ok(embeddings) = retrieve::fetch_embeddings(&ready.conn, &input.ids, &self.project_id).await
+            && !embeddings.is_empty()
+        {
+            let exclude: std::collections::HashSet<String> = input.ids.iter().cloned().collect();
+
+            let mut mem_seen = std::collections::HashSet::new();
+            let mut mem_similar: Vec<retrieve::CompactResult> = Vec::new();
+            let mut code_seen = std::collections::HashSet::new();
+            let mut code_similar: Vec<index::search::CodeResult> = Vec::new();
+            let idx = self.try_index_ready().ok();
+
+            for (mem_id, embedding) in &embeddings {
+                let title = by_id.get(mem_id.as_str()).map(|m| m.title.as_str()).unwrap_or("");
+                let results = retrieve::search(
+                    &ready.conn, embedding.clone(), title, &self.project_id, 8
+                ).await.unwrap_or_default();
+                for r in results {
+                    if !exclude.contains(&r.id) && mem_seen.insert(r.id.clone()) {
+                        mem_similar.push(r);
+                    }
+                }
+                if let Some(ref idx) = idx {
+                    let code_results = index::search::search_code(
+                        &idx.conn, embedding.clone(), title, 5
+                    ).await.unwrap_or_default();
+                    for r in code_results {
+                        if code_seen.insert(r.id.clone()) {
+                            code_similar.push(r);
                         }
                     }
-                    for v in &mut centroid { *v /= n; }
+                }
+            }
 
-                    let exclude: std::collections::HashSet<String> = input.ids.iter().cloned().collect();
-                    let query_text = memories.iter().map(|m| m.title.as_str()).collect::<Vec<_>>().join(" ");
+            mem_similar.truncate(5);
+            code_similar.truncate(5);
 
-                    let mem_similar: Vec<_> = retrieve::search(
-                        &ready.conn, centroid.clone(), &query_text, &self.project_id, 10
-                    ).await.unwrap_or_default()
-                        .into_iter()
-                        .filter(|m| !exclude.contains(&m.id))
-                        .take(5)
-                        .collect();
-
-                    let code_similar: Vec<_> = if let Ok(idx) = self.try_index_ready() {
-                        index::search::search_code(&idx.conn, centroid, &query_text, 5)
-                            .await.unwrap_or_default()
-                    } else {
-                        vec![]
-                    };
-
-                    if !mem_similar.is_empty() || !code_similar.is_empty() {
-                        out.push_str("\n---\nsimilar:\n");
-                        for m in &mem_similar {
-                            out.push_str(&format!("  [memory] {}  {}  ~{}c\n", m.id, m.title, m.content_len));
-                        }
-                        for c in &code_similar {
-                            out.push_str(&format!("  [symbol] {}  {}:{}-{}\n",
-                                c.qualified_name, c.file_path, c.line_start, c.line_end));
-                        }
-                    }
+            if !mem_similar.is_empty() || !code_similar.is_empty() {
+                out.push_str("\n---\nsimilar:\n");
+                for m in &mem_similar {
+                    out.push_str(&format!("  [memory] {}  {}  ~{}c\n", m.id, m.title, m.content_len));
+                }
+                for c in &code_similar {
+                    out.push_str(&format!("  [symbol] {}  {}:{}-{}\n",
+                        c.qualified_name, c.file_path, c.line_start, c.line_end));
                 }
             }
         }
