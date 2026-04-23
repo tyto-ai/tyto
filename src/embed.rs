@@ -59,6 +59,13 @@ pub fn floats_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
+/// Decode a little-endian byte blob back to a float slice. Inverse of floats_to_blob.
+pub fn blob_to_floats(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

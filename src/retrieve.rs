@@ -276,6 +276,34 @@ pub async fn get_full_batch(
     Ok(memories)
 }
 
+/// Fetch stored embedding vectors for a batch of memory IDs. Used to compute a
+/// centroid for cross-type similar results without re-running the embedding model.
+pub async fn fetch_embeddings(
+    conn: &libsql::Connection,
+    ids: &[String],
+    project_id: &str,
+) -> Result<Vec<Vec<f32>>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT mv.embedding FROM memory_vectors mv \
+         JOIN memories m ON m.id = mv.memory_id \
+         WHERE mv.memory_id IN ({placeholders}) AND m.project_id = ?"
+    );
+    let params: Vec<libsql::Value> = ids.iter().cloned().map(libsql::Value::Text)
+        .chain(std::iter::once(libsql::Value::Text(project_id.to_string())))
+        .collect();
+    let mut rows = conn.query(&sql, params_from_iter(params)).await?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let blob: Vec<u8> = row.get(0)?;
+        result.push(embed::blob_to_floats(&blob));
+    }
+    Ok(result)
+}
+
 /// Pin or unpin a batch of memories in a single query. Returns the number of rows updated.
 pub async fn pin_batch(conn: &libsql::Connection, ids: &[String], project_id: &str, pin: bool) -> Result<u64> {
     if ids.is_empty() {
