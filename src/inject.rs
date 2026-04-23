@@ -112,6 +112,7 @@ async fn run_inner(
     limit: usize,
     budget: usize,
 ) -> Result<()> {
+    let t_total = std::time::Instant::now();
     let cwd = env::current_dir()?;
     let config = Config::load(&cwd)?;
 

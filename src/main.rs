@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Serve { config: config_path } => {
+            // init_tracing_to_file() is called inside serve::run() after log::init(),
+            // so tracing output lands in the log file rather than discarded stderr.
             let cwd = std::env::current_dir()?;
             let start = config_path
                 .as_deref()
@@ -77,6 +79,7 @@ async fn main() -> Result<()> {
             serve::run(config).await?;
         }
         Command::Inject { r#type, project, query, limit, budget } => {
+            tyto::log::init_tracing();
             if let Err(e) = inject::run(&r#type, project, query, limit, budget).await {
                 eprintln!("tyto inject error: {e}");
             }

@@ -45,10 +45,12 @@ impl Embedder {
     }
 
     pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+        let t = std::time::Instant::now();
         let results = self
             .model
             .embed(vec![text], None)
             .context("Embedding failed")?;
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), chars = text.len(), "embed");
         results.into_iter().next().context("Embedding model returned no results")
     }
 }

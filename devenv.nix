@@ -7,6 +7,7 @@
 
   env.TYTO_BINARY_OVERRIDE = "${config.devenv.root}/target/release/tyto";
   env.TYTO_CHANNEL = "dev";
+  env.RUST_LOG = "tyto=debug";
 
   packages = with pkgs; [
     act

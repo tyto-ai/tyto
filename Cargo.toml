@@ -56,6 +56,10 @@ serde_with = { version = "*", features = ["macros", "json"] }
 # Secret sanitization
 regex = "*"
 
+# Structured tracing and timing instrumentation
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Error handling
 anyhow = "*"
 

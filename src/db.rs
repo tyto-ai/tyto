@@ -11,6 +11,7 @@ pub struct Db {
 
 impl Db {
     pub async fn open(config: &Config) -> Result<Self> {
+        let t = std::time::Instant::now();
         let s = &config.memory.storage;
         let db = match s.mode {
             StorageMode::Managed | StorageMode::Local | StorageMode::Disabled => {
@@ -76,6 +77,7 @@ impl Db {
             .context("Failed to set WAL mode / busy_timeout")?;
         }
 
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "Db::open");
         Ok(Self { conn, _db: db })
     }
 }

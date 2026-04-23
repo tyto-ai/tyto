@@ -709,15 +709,19 @@ impl TytoServer {
 
     #[tool(description = "Search memories, source code, and git history simultaneously. Use this by default. Returns memory results and code results in separate sections.")]
     async fn search(&self, Parameters(input): Parameters<SearchInput>) -> Result<String, String> {
+        let t_search = std::time::Instant::now();
         let db_ready = self.try_ready()?;
         let limit = input.limit.unwrap_or(5);
 
         let embedding = {
+            let t_lock = std::time::Instant::now();
             let mut e = db_ready.embedder.lock().await;
+            tracing::debug!(elapsed_ms = t_lock.elapsed().as_millis(), "embedder lock wait");
             e.embed(&input.query).map_err(|e| format!("embed failed: {e}"))?
         };
 
         // Memory search
+        let t_mem = std::time::Instant::now();
         let memory_results = retrieve::search(
             &db_ready.conn,
             embedding.clone(),
@@ -880,6 +884,7 @@ pub async fn run(config: Config) -> Result<()> {
         .map(|p| p.join("tyto-serve.log"))
         .unwrap_or_else(|| std::path::PathBuf::from("tyto-serve.log"));
     crate::log::init(&log_path);
+    crate::log::init_tracing_to_file();
 
     mlog!("=== tyto serve starting ===");
     mlog!("version: {}", env!("CARGO_PKG_VERSION"));
