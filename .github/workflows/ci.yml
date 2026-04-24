@@ -23,21 +23,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # ort-sys downloads ONNX Runtime to ORT_CACHE_DIR at build time.
-      # Cache keyed on the ort-sys version so it survives Cargo.lock changes.
-      - uses: actions/cache@v4
-        with:
-          path: .ort-cache
-          key: ort-sys-2.0.0-rc.12-x86_64-unknown-linux-gnu
-
       - name: Clippy
-        env:
-          ORT_CACHE_DIR: ${{ github.workspace }}/.ort-cache
         run: cargo clippy -- -D warnings
 
       - name: Test
-        env:
-          ORT_CACHE_DIR: ${{ github.workspace }}/.ort-cache
         run: cargo test
 
   # Build-only checks for the other platforms agents run on.
@@ -53,23 +42,18 @@ jobs:
         include:
           - os: ubuntu-latest       # Linux x86_64 (most common deployment target)
             target: x86_64-unknown-linux-gnu
-            ort-platform: x86_64-unknown-linux-gnu
             binary: tyto
           - os: macos-latest        # Apple Silicon (arm64)
             target: aarch64-apple-darwin
-            ort-platform: aarch64-apple-darwin
             binary: tyto
           - os: ubuntu-24.04-arm   # Linux ARM64 (Graviton, Raspberry Pi, etc.)
             target: aarch64-unknown-linux-gnu
-            ort-platform: aarch64-unknown-linux-gnu
             binary: tyto
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            ort-platform: x86_64-pc-windows-msvc
             binary: tyto.exe
           - os: windows-latest      # Copilot+ PCs / Snapdragon X - cross-compile from x86_64
             target: aarch64-pc-windows-msvc
-            ort-platform: aarch64-pc-windows-msvc
             binary: tyto.exe
 
     steps:
@@ -83,16 +67,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # ort-sys downloads ONNX Runtime to ORT_CACHE_DIR at build time.
-      # Cache keyed on the ort-sys version so it survives Cargo.lock changes.
-      - uses: actions/cache@v4
-        with:
-          path: .ort-cache
-          key: ort-sys-2.0.0-rc.12-${{ matrix.ort-platform }}
-
       - name: Build
-        env:
-          ORT_CACHE_DIR: ${{ github.workspace }}/.ort-cache
         run: cargo build --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4

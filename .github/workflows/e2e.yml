@@ -50,14 +50,7 @@ jobs:
         with:
           key: e2e-${{ matrix.target }}
 
-      - uses: actions/cache@v4
-        with:
-          path: .ort-cache
-          key: ort-sys-2.0.0-rc.12-${{ matrix.target }}
-
       - name: Build release binaries
-        env:
-          ORT_CACHE_DIR: ${{ github.workspace }}/.ort-cache
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Set binary path
