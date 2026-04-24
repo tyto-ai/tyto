@@ -230,7 +230,12 @@ pub async fn search(
             .map(|&r| 1.0 / (RRF_K + r as f64))
             .unwrap_or(0.0);
         let boost = source_boost(query, &memory_type);
-        let score = (rrf_v + rrf_kw) * ret * boost;
+        // Relevance-primary scoring: retention boosts up to +SALIENCE_ALPHA rather than
+        // multiplying, so a low-retention memory cannot be suppressed below its raw RRF.
+        // TUNING: SALIENCE_ALPHA controls how much a high-retention memory can outrank
+        // an equally-relevant low-retention one (0.3 = up to 30% boost).
+        const SALIENCE_ALPHA: f64 = 0.3;
+        let score = (rrf_v + rrf_kw) * boost * (1.0 + SALIENCE_ALPHA * ret);
 
         scored.push(CompactResult { id, memory_type, title, created_at, importance, score, content_len: content_len as usize, facts_json, tags_json });
     }
