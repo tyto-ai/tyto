@@ -1049,7 +1049,7 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     
     tokio::spawn(async move {
         loop {
-            if fs4::FileExt::try_lock(&lock_file).is_ok() {
+            if lock_file.try_lock().is_ok() {
                 mlog!("tyto: acquired serve.lock (primary)");
                 is_primary_bg.store(true, std::sync::atomic::Ordering::SeqCst);
                 break;

@@ -52,8 +52,8 @@ fn serve_state(config: &Config) -> ServeState {
     };
     // Ok(()) = we acquired the lock -> nothing is running
     // Err(_) = another process holds it (WouldBlock) -> serve is loading
-    match fs4::FileExt::try_lock(&file) {
-        Ok(()) => { let _ = fs4::FileExt::unlock(&file); ServeState::NotRunning }
+    match file.try_lock() {
+        Ok(()) => { let _ = file.unlock(); ServeState::NotRunning }
         Err(_) => ServeState::Loading,
     }
 }
