@@ -524,8 +524,10 @@ impl TytoServer {
         let total = input.ids.len();
         let action = if input.pin { "Pinned" } else { "Unpinned" };
         match retrieve::pin_batch(&ready.conn, &input.ids, &self.project_id, input.pin).await {
-            Ok(n) if n as usize == total => Ok(format!("{action} {n} memories")),
-            Ok(n) => Ok(format!("{action} {n}/{total} memories ({} not found)", total - n as usize)),
+            Ok(n) if n as usize == total => Ok(format!("{action} {total} memories")),
+            // turso execute() may return an unreliable count on file-based WAL DBs (upstream bug).
+            // saturating_sub prevents a display underflow; the actual pin operation is correct.
+            Ok(n) => Ok(format!("{action} {n}/{total} memories ({} not found)", total.saturating_sub(n as usize))),
             Err(e) => Err(format!("pin_memories failed: {e}")),
         }
     }
@@ -545,8 +547,10 @@ impl TytoServer {
         }
         let total = input.ids.len();
         match retrieve::delete_batch(&ready.conn, &input.ids, &self.project_id).await {
-            Ok(n) if n as usize == total => Ok(format!("Deleted {n} memories")),
-            Ok(n) => Ok(format!("Deleted {n}/{total} memories ({} not found)", total - n as usize)),
+            Ok(n) if n as usize == total => Ok(format!("Deleted {total} memories")),
+            // turso execute() may return an unreliable count on file-based WAL DBs (upstream bug).
+            // saturating_sub prevents a display underflow; the actual delete operation is correct.
+            Ok(n) => Ok(format!("Deleted {n}/{total} memories ({} not found)", total.saturating_sub(n as usize))),
             Err(e) => Err(format!("delete_memories failed: {e}")),
         }
     }
