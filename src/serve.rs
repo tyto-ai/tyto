@@ -435,6 +435,11 @@ impl TytoServer {
         {
             let exclude: std::collections::HashSet<String> = input.ids.iter().cloned().collect();
 
+            // TUNING: 0.013 derived from empirical score distribution (2026-04-24).
+            // Stricter than search — unsolicited results must be genuinely related.
+            // Below 0.012 is general project context with no specific connection.
+            const MIN_SIMILAR_SCORE: f64 = 0.013;
+
             let mut mem_seen = std::collections::HashSet::new();
             let mut mem_similar: Vec<retrieve::CompactResult> = Vec::new();
             let mut code_seen = std::collections::HashSet::new();
@@ -447,7 +452,7 @@ impl TytoServer {
                     &ready.conn, embedding.clone(), title, &self.project_id, 8
                 ).await.unwrap_or_default();
                 for r in results {
-                    if !exclude.contains(&r.id) && mem_seen.insert(r.id.clone()) {
+                    if r.score >= MIN_SIMILAR_SCORE && !exclude.contains(&r.id) && mem_seen.insert(r.id.clone()) {
                         mem_similar.push(r);
                     }
                 }
@@ -456,7 +461,7 @@ impl TytoServer {
                         &idx.conn, embedding.clone(), title, 5
                     ).await.unwrap_or_default();
                     for r in code_results {
-                        if code_seen.insert(r.id.clone()) {
+                        if r.rrf_score >= MIN_SIMILAR_SCORE && code_seen.insert(r.id.clone()) {
                             code_similar.push(r);
                         }
                     }
@@ -670,6 +675,8 @@ impl TytoServer {
         }
 
         // Cross-type similar results (best-effort: skip if DB not ready or embed fails)
+        // TUNING: same MIN_SIMILAR_SCORE as get_memories — unsolicited, must earn place.
+        const MIN_SIMILAR_SCORE: f64 = 0.013;
         if let Ok(db_ready) = self.try_ready() {
             let first = &results[0];
             let embed_text = format!(
@@ -682,9 +689,12 @@ impl TytoServer {
                 let mut e = db_ready.embedder.lock().await;
                 e.embed(&embed_text)
             } {
-                let mem_similar = retrieve::search(
+                let mem_similar: Vec<_> = retrieve::search(
                     &db_ready.conn, embedding.clone(), &embed_text, &self.project_id, 5
-                ).await.unwrap_or_default();
+                ).await.unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| r.score >= MIN_SIMILAR_SCORE)
+                    .collect();
 
                 let exclude: std::collections::HashSet<String> =
                     results.iter().map(|r| r.id.clone()).collect();
@@ -692,7 +702,7 @@ impl TytoServer {
                     &idx.conn, embedding, &embed_text, 10
                 ).await.unwrap_or_default()
                     .into_iter()
-                    .filter(|r| !exclude.contains(&r.id))
+                    .filter(|r| !exclude.contains(&r.id) && r.rrf_score >= MIN_SIMILAR_SCORE)
                     .take(5)
                     .collect();
 
@@ -746,14 +756,25 @@ impl TytoServer {
 
         // Code search (best-effort: don't fail the whole search if index not ready)
         let t_code = std::time::Instant::now();
-        let code_results = if let Ok(idx) = self.try_index_ready() {
-            let r = index::search::search_code(&idx.conn, embedding, &input.query, limit)
-                .await
-                .unwrap_or_default();
-            tracing::debug!(elapsed_ms = t_code.elapsed().as_millis(), results = r.len(), "code search");
-            r
-        } else {
-            vec![]
+        let index_state_hint: Option<&str>;
+        let code_results = match self.try_index_ready() {
+            Ok(idx) => {
+                index_state_hint = None;
+                let r = index::search::search_code(&idx.conn, embedding, &input.query, limit)
+                    .await
+                    .unwrap_or_default();
+                tracing::debug!(elapsed_ms = t_code.elapsed().as_millis(), results = r.len(), "code search");
+                r
+            }
+            Err(_) => {
+                index_state_hint = match &*self.idx.borrow() {
+                    index::IndexState::Opening => Some("initializing"),
+                    index::IndexState::Failed(_) => Some("failed"),
+                    // Disabled is intentional — don't surface it on every search.
+                    _ => None,
+                };
+                vec![]
+            }
         };
 
         // Merge memory and code results into a single list ranked by score.
@@ -769,16 +790,21 @@ impl TytoServer {
             items.push((r.rrf_score, s));
         }
 
-        // Sort by score descending, then drop anything below the minimum threshold.
-        // Threshold eliminates low-signal results that waste context on noise.
-        const MIN_SCORE: f64 = 0.012;
+        // Sort by score descending, then apply two gates:
+        // 1. Top-score gate: if the best result is below 0.020 the whole set is noise
+        //    (empirical: irrelevant queries top out at ~0.017; relevant ones at 0.025+).
+        //    This avoids returning random cosine hits when nothing is relevant.
+        // 2. Floor gate: drop any individual result below 0.010 within an otherwise
+        //    relevant result set (removes stragglers that crept past the cosine filter).
+        const MIN_TOP_SCORE: f64 = 0.020;
+        const MIN_SCORE: f64 = 0.010;
         items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        items.retain(|(score, _)| *score >= MIN_SCORE);
 
-        if items.is_empty() {
+        if items.is_empty() || items[0].0 < MIN_TOP_SCORE {
             tracing::debug!(elapsed_ms = t_search.elapsed().as_millis(), "search handler (no results above threshold)");
             return Ok("No results found.".to_string());
         }
+        items.retain(|(score, _)| *score >= MIN_SCORE);
 
         let total = items.len();
         let mut out = format!("--- Context ({total} results) ---\n");
@@ -787,8 +813,13 @@ impl TytoServer {
         }
         let all_count = memory_results.len() + code_results.len();
         let truncated = memory_results.len() >= limit || code_results.len() >= limit;
+        let index_field = match index_state_hint {
+            Some("initializing") => ", code_index: \"initializing — retry for code results\"",
+            Some("failed") => ", code_index: \"failed — check tyto-serve.log\"",
+            _ => "",
+        };
         out.push_str(&format!(
-            "_meta: {{returned: {total}, total_before_cutoff: {all_count}, truncated: {truncated}}}\n"
+            "_meta: {{returned: {total}, total_before_cutoff: {all_count}, truncated: {truncated}{index_field}}}\n"
         ));
         tracing::debug!(elapsed_ms = t_search.elapsed().as_millis(), total, "search handler total");
         Ok(out)
@@ -1083,20 +1114,30 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
                                 let idx_ready = Arc::new(idx_ready);
                                 let _ = idx_tx_clone.send(index::IndexState::Ready(Arc::clone(&idx_ready)));
                                 mlog!("tyto: code index ready, starting background indexing...");
-                                let conn = Arc::clone(&idx_ready.conn);
+                                // Indexer and watcher get dedicated connections — must NOT share
+                                // idx_ready.conn (the search connection) due to turso's per-Connection
+                                // ConcurrentGuard which allows only one concurrent operation per instance.
+                                let indexer_conn = match idx_ready.new_conn() {
+                                    Ok(c) => c,
+                                    Err(e) => { mlog!("tyto: failed to create indexer connection: {e:#}"); return; }
+                                };
                                 let emb = Arc::clone(&embedder_for_idx);
-                                match index::indexer::run(project_root.clone(), conn.clone(), emb.clone(), git_history, extra_excludes.clone()).await {
+                                match index::indexer::run(project_root.clone(), indexer_conn, emb.clone(), git_history, extra_excludes.clone()).await {
                                     Ok(r) => mlog!(
                                         "tyto: code index complete — {} files, {} chunks",
                                         r.files_indexed, r.chunks_stored
                                     ),
                                     Err(e) => mlog!("tyto: code index run failed: {e:#}"),
                                 }
+                                let watcher_conn = match idx_ready.new_conn() {
+                                    Ok(c) => c,
+                                    Err(e) => { mlog!("tyto: failed to create watcher connection: {e:#}"); return; }
+                                };
                                 let watcher_lock = config_for_bg.index_watcher_lock_path();
                                 index::watcher::start(
                                     watcher_lock,
                                     project_root,
-                                    conn,
+                                    watcher_conn,
                                     emb,
                                     git_history,
                                     extra_excludes,
@@ -1119,13 +1160,12 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
                 let _ = idx_tx_clone.send(index::IndexState::Disabled);
             }
         }
-        // Park this file handle for the process lifetime so the OS flock stays held.
-        // When the process exits tokio cancels the task, lock_file drops, and the lock
-        // is released — which is the correct handover signal for any waiting secondaries.
-        tokio::spawn(async move {
-            let _lock_guard = lock_file;
-            std::future::pending::<()>().await;
-        });
+        // Hand serve.lock ownership to the OS. The fd is closed at true process exit,
+        // not during Tokio shutdown. This ensures serve.lock is released only AFTER
+        // all other file handles (memory.db, index.db) are also released — eliminating
+        // the handover race where a new process acquires serve.lock while the old one
+        // still has DB files open during Tokio task cancellation.
+        std::mem::forget(lock_file);
     });
 
     // Start MCP transport immediately — Claude Code sees us as connected right away.
