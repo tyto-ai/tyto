@@ -1119,9 +1119,13 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
                 let _ = idx_tx_clone.send(index::IndexState::Disabled);
             }
         }
-        // Keep lock_file alive until end of process; drop releases it.
-        // We moved the lock_file into this task.
-        std::mem::forget(lock_file);
+        // Park this file handle for the process lifetime so the OS flock stays held.
+        // When the process exits tokio cancels the task, lock_file drops, and the lock
+        // is released — which is the correct handover signal for any waiting secondaries.
+        tokio::spawn(async move {
+            let _lock_guard = lock_file;
+            std::future::pending::<()>().await;
+        });
     });
 
     // Start MCP transport immediately — Claude Code sees us as connected right away.
