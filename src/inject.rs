@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::env;
 use std::io::{IsTerminal, Read};
+use turso::Connection;
 
 use crate::{config::{StorageMode, Config}, db::Db, migrations, project_id, request, retrieve};
 
@@ -51,8 +52,8 @@ fn serve_state(config: &Config) -> ServeState {
     };
     // Ok(()) = we acquired the lock -> nothing is running
     // Err(_) = another process holds it (WouldBlock) -> serve is loading
-    match file.try_lock() {
-        Ok(()) => { let _ = file.unlock(); ServeState::NotRunning }
+    match fs4::FileExt::try_lock(&file) {
+        Ok(()) => { let _ = fs4::FileExt::unlock(&file); ServeState::NotRunning }
         Err(_) => ServeState::Loading,
     }
 }
@@ -228,7 +229,7 @@ async fn run_inner(
 // Prompt injection is best-effort context; keyword relevance is sufficient here.
 // Full hybrid search is reserved for session-start where latency tolerance is higher.
 async fn run_prompt(
-    conn: &libsql::Connection,
+    conn: &Connection,
     query: &str,
     project_id: &str,
     limit: usize,
@@ -281,7 +282,7 @@ fn is_stop_hook_active() -> bool {
 const FULL_CONTENT_BUDGET: usize = 30_000;
 
 async fn run_session(
-    conn: &libsql::Connection,
+    conn: &Connection,
     project_id: &str,
     budget: usize,
 ) -> Result<()> {
@@ -362,7 +363,7 @@ struct PendingCapture {
 }
 
 async fn query_pending_captures(
-    conn: &libsql::Connection,
+    conn: &Connection,
     project_id: &str,
 ) -> Result<Vec<PendingCapture>> {
     let mut rows = conn
@@ -371,7 +372,7 @@ async fn query_pending_captures(
              FROM raw_captures \
              WHERE project_id = ?1 AND presented_at IS NULL \
              ORDER BY captured_at ASC",
-            libsql::params![project_id.to_string()],
+            (project_id.to_string(),),
         )
         .await?;
 
@@ -386,12 +387,12 @@ async fn query_pending_captures(
     Ok(captures)
 }
 
-async fn mark_captures_presented(conn: &libsql::Connection, project_id: &str) -> Result<()> {
+async fn mark_captures_presented(conn: &Connection, project_id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "UPDATE raw_captures SET presented_at = ?1 \
          WHERE project_id = ?2 AND presented_at IS NULL",
-        libsql::params![now, project_id.to_string()],
+        (now, project_id.to_string()),
     )
     .await?;
     Ok(())
@@ -567,7 +568,7 @@ fn format_full_memory(mem: &retrieve::FullMemory) -> String {
 /// Called by `serve::session_context` tool — this is the recovery path when
 /// `tyto serve` was still loading at session start.
 pub async fn build_tool_session_content(
-    conn: &libsql::Connection,
+    conn: &Connection,
     project_id: &str,
 ) -> Result<String> {
     let captures = query_pending_captures(conn, project_id).await?;

@@ -1,26 +1,34 @@
 use anyhow::{Context, Result};
-use libsql::{Builder, Connection, Database};
+use turso::{Connection, Database};
 use std::path::Path;
 
 use crate::{config::{StorageMode, RemoteMode, Config}, mlog};
 
+pub enum AnyDb {
+    Local(Database),
+    Synced(turso::sync::Database),
+}
+
 pub struct Db {
     pub conn: Connection,
-    _db: Database,
+    pub handle: AnyDb,
 }
 
 impl Db {
     pub async fn open(config: &Config) -> Result<Self> {
         let t = std::time::Instant::now();
         let s = &config.memory.storage;
-        let db = match s.mode {
+        let any_db = match s.mode {
             StorageMode::Managed | StorageMode::Local | StorageMode::Disabled => {
                 let path = config.db_path();
                 ensure_parent_dir(&path)?;
-                Builder::new_local(&path)
+                let db = turso::Builder::new_local(path.to_str().context("DB path is not valid UTF-8")?)
+                    .experimental_multiprocess_wal(true)
+                    .experimental_index_method(true)
                     .build()
                     .await
-                    .with_context(|| format!("Failed to open local DB at {}", path.display()))?
+                    .with_context(|| format!("Failed to open local DB at {}", path.display()))?;
+                AnyDb::Local(db)
             }
             StorageMode::Remote => {
                 let url = s
@@ -33,128 +41,100 @@ impl Db {
                     .context("remote mode requires memory.remote_auth_token")?;
                 match s.remote_mode {
                     RemoteMode::Direct => {
-                        // No local file for direct mode; ensure the managed dir exists for
-                        // serve.lock, serve.ready, and crash.log.
-                        ensure_parent_dir(&config.db_path())?;
-                        Builder::new_remote(url.to_string(), token.to_string())
-                            .build()
-                            .await
-                            .with_context(|| format!("Failed to connect to remote at {url}"))?
+                        // Limbo 0.6.0 does not yet support direct remote client mode.
+                        // We use a temporary file replica as a workaround.
+                        let tmp_dir = std::env::temp_dir().join("tyto-remote-direct");
+                        std::fs::create_dir_all(&tmp_dir)?;
+                        let path = tmp_dir.join("memory.db");
+                        let path_str = path.to_str().context("temp path is not valid UTF-8")?;
+                        let db = open_replica_with_recovery(path_str, &path, url, token).await?;
+                        AnyDb::Synced(db)
                     }
                     RemoteMode::Replica => {
                         let path = config.db_path();
                         ensure_parent_dir(&path)?;
                         let path_str = path.to_str().context("replica DB path is not valid UTF-8")?;
-                        // No timeout: initial sync duration scales with DB size and network speed.
-                        // A hard timeout risks killing mid-sync and leaving the replica in a
-                        // partial state. libsql WAL is crash-safe so a SIGTERM mid-sync is
-                        // recoverable via the purge-and-retry path in open_replica_with_recovery.
-                        open_replica_with_recovery(path_str, path.as_ref(), url, token).await?
+                        let db = open_replica_with_recovery(path_str, path.as_ref(), url, token).await?;
+                        AnyDb::Synced(db)
                     }
                 }
             }
         };
 
-        let conn = db.connect().context("Failed to connect to database")?;
+        let conn = match &any_db {
+            AnyDb::Local(db) => db.connect().context("Failed to connect to database")?,
+            AnyDb::Synced(db) => db.connect().await.context("Failed to connect to synced database")?,
+        };
 
-        // Enable WAL mode and a generous busy timeout for local mode only.
-        // WAL allows concurrent readers while a writer holds the lock; busy_timeout
-        // makes writers retry for up to 5s instead of immediately returning SQLITE_BUSY.
-        // This makes local mode safe for multiple concurrent tyto processes (e.g.
-        // multiple agents or IDE windows on the same project).
-        //
-        // Skipped for replica mode: the local replica file is managed by libsql's
-        // sync engine and pragma behaviour there is undocumented - leave it alone.
-        //
-        // Known gap: the in-process WriteLock dedup guard does not extend across
-        // processes, so concurrent agents may occasionally write duplicate memories.
-        // Acceptable for v1; a shared-lock or daemon model can address this later.
         if matches!(s.mode, StorageMode::Managed | StorageMode::Local) {
-            conn.execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"
-            )
-            .await
-            .context("Failed to set WAL mode / busy_timeout")?;
+            // turso 0.6.0 uses experimental_multiprocess_wal(true) which enables WAL internally.
+            // busy_timeout is also important.
+            conn.execute_batch("PRAGMA busy_timeout=5000;")
+                .await
+                .context("Failed to set busy_timeout")?;
         }
 
         tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "Db::open");
-        Ok(Self { conn, _db: db })
+        Ok(Self { conn, handle: any_db })
     }
 }
 
-/// Open a remote replica, automatically recovering from local file corruption.
-///
-/// If the initial open fails (e.g. "database disk image is malformed" after a
-/// mid-write process kill), delete all local replica files and retry once.
-/// The remote is the source of truth, so this is always safe.
-///
-/// # Known failure mode: replica stuck in bad state after auth failure
-///
-/// Observed sequence (2026-04-11):
-///   1. MCP server starts without auth token -> `build()` fails with auth error.
-///   2. Recovery calls `purge_replica_files`. If the replica file was never
-///      created (build failed before writing it), `remove_file` gets ENOENT even
-///      though `exists()` returned true a moment earlier (TOCTOU race - libsql's
-///      own builder may clean up the partial file between the two calls).
-///   3. That ENOENT propagates as a crash, written to crash.log.
-///   4. Next session: replica file is gone. libsql must do a full initial sync
-///      (~10s+), which exceeds the previous 10s hard timeout -> stuck in timeout
-///      loop across sessions.
-///
-/// Fixes applied:
-///   - `purge_replica_files` now uses attempt-and-ignore-NotFound instead of
-///     exists()-then-remove (eliminates TOCTOU).
-///   - Timeout is 60s when replica file is absent (initial/post-purge sync),
-///     10s when it already exists (incremental sync only).
-///
-/// TODO: surface this state to the user more gracefully:
-///   - Detect "replica missing after previous crash" and emit a clear message.
-///   - Consider a `tyto remote reset` command that purges local replica files
-///     and forces a clean re-sync, giving the user a self-service recovery path.
-///   - Track whether the last open was a fresh sync vs incremental to give
-///     better timeout/progress feedback.
 async fn open_replica_with_recovery(
     path_str: &str,
     path: &Path,
     url: &str,
     token: &str,
-) -> Result<Database> {
-    let build = || {
-        Builder::new_remote_replica(path_str, url.to_string(), token.to_string())
-            .sync_interval(std::time::Duration::from_secs(1))
-            .build()
+) -> Result<turso::sync::Database> {
+    let build = || async {
+        let mut last_err = None;
+        for _ in 0..10 {
+            match turso::sync::Builder::new_remote(path_str)
+                .with_remote_url(url)
+                .with_auth_token(token)
+                .build()
+                .await
+            {
+                Ok(db) => return Ok(db),
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        Err(anyhow::anyhow!("Failed to build replica after 10 attempts: {}", last_err.unwrap()))
     };
 
-    // Try build + sync, treating any error as a corruption signal worth purging for.
-    // Returns Ok(db) only when both build and sync succeed.
+    let try_sync = |db: turso::sync::Database| async move {
+        let mut last_err = None;
+        for _ in 0..5 {
+            match db.pull().await {
+                Ok(_) => return Ok(db),
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        Err(anyhow::anyhow!("Failed to sync replica after 5 attempts: {}", last_err.unwrap()))
+    };
+
     let try_open = || async {
         let db = build().await?;
-        let t = std::time::Instant::now();
-        db.sync().await.map_err(|e| anyhow::anyhow!("replica sync failed: {e:#}"))?;
-        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "replica sync");
-        Ok::<_, anyhow::Error>(db)
+        try_sync(db).await
     };
 
-    // First attempt: use existing local files (fast incremental sync).
     match try_open().await {
         Ok(db) => return Ok(db),
         Err(e) => mlog!("tyto: replica open failed ({e:#}), purging and retrying..."),
     }
 
-    // Recovery: purge all replica files and force a full re-sync from remote.
-    // Replica files are distinct from local-mode `memory.db`, so this is always safe.
     purge_replica_files(path)?;
 
-    // Second attempt: fresh sync from Turso. If this also fails, surface the error.
     try_open().await.with_context(|| {
         format!("Failed to open replica DB at {} (after recovery attempt)", path.display())
     })
 }
 
-/// Delete all libsql replica local files so the next open does a clean re-sync.
-/// Deletes every file in the same directory whose name starts with the replica
-/// filename — this covers any suffix libsql uses (.db, -shm, -wal, -info, -meta,
-/// future variants) without needing to enumerate them explicitly.
 pub fn purge_replica_files(path: &Path) -> Result<()> {
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     let prefix = path.file_name()

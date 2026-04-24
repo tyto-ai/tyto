@@ -1,9 +1,12 @@
 use anyhow::Result;
-use libsql::Connection;
+use tokio::sync::Mutex;
 
 /// Apply the code intelligence schema to index.db.
 /// All DDL is IF NOT EXISTS so it is safe to call on every startup.
-pub async fn ensure(conn: &Connection) -> Result<()> {
+pub async fn ensure(conn: &Mutex<rusqlite::Connection>) -> Result<()> {
+    let conn = conn.lock().await;
+    
+    // Use synchronous rusqlite calls inside the lock.
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA busy_timeout=5000;
@@ -38,12 +41,9 @@ pub async fn ensure(conn: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS index_vectors (
              chunk_id    TEXT NOT NULL REFERENCES index_chunks(id) ON DELETE CASCADE,
              embed_model TEXT NOT NULL,
-             embedding   F32_BLOB(384) NOT NULL,
+             embedding   BLOB NOT NULL,
              PRIMARY KEY (chunk_id, embed_model)
          );
-
-         CREATE INDEX IF NOT EXISTS index_vectors_idx
-             ON index_vectors (libsql_vector_idx(embedding));
 
          CREATE VIRTUAL TABLE IF NOT EXISTS index_chunks_fts
              USING fts5(symbol_name, qualified_name, signature, doc_comment, body_preview,
@@ -83,14 +83,13 @@ pub async fn ensure(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS index_chunk_commits_by_sha
              ON index_chunk_commits (commit_sha);
         ",
-    )
-    .await?;
+    )?;
 
     // Add hotspot_score column to existing DBs (idempotent: error ignored if already present).
     let _ = conn.execute(
         "ALTER TABLE index_chunks ADD COLUMN hotspot_score REAL DEFAULT 0.0",
-        libsql::params![],
-    ).await;
+        [],
+    );
 
     Ok(())
 }

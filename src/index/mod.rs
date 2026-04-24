@@ -6,7 +6,6 @@ pub mod search;
 pub mod watcher;
 
 use anyhow::Result;
-use libsql::Builder;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -14,7 +13,7 @@ use tokio::sync::Mutex;
 use crate::embed::Embedder;
 
 pub struct IndexReady {
-    pub conn: Arc<libsql::Connection>,
+    pub conn: Arc<Mutex<rusqlite::Connection>>,
     pub embedder: Arc<Mutex<Embedder>>,
     pub project_root: PathBuf,
     pub git_history: bool,
@@ -42,8 +41,15 @@ pub async fn open(
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let db = Builder::new_local(db_path).build().await?;
-    let conn = Arc::new(db.connect()?);
+    
+    let db_path = db_path.to_path_buf();
+    let conn = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(db_path)?;
+        Ok::<_, anyhow::Error>(conn)
+    }).await??;
+
+    let conn = Arc::new(Mutex::new(conn));
     schema::ensure(&conn).await?;
+    
     Ok(IndexReady { conn, embedder, project_root, git_history })
 }

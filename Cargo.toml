@@ -9,8 +9,9 @@ description = "Persistent memory and code intelligence for AI agents, backed by 
 # MCP stdio transport
 rmcp = { version = "*", features = ["server", "client", "transport-io"] }
 
-# Database - embedded SQLite replica with Turso sync
-libsql = "*"
+# Database - pure Rust SQLite engine with Turso sync
+turso = { version = "0.6.0-pre.22", features = ["sync"] }
+rusqlite = { version = "*", features = ["bundled"] }
 
 # Local ONNX embeddings (bge-small-en-v1.5)
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
@@ -62,6 +63,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "*"
+tempfile = "*"
 
 # Time
 chrono = { version = "*", features = ["serde"] }

@@ -19,6 +19,7 @@ use serde_with::{DisplayFromStr, PickFirst, json::JsonString, serde_as};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use turso::Connection;
 
 
 use crate::{
@@ -35,8 +36,10 @@ use crate::{
 
 /// Database connection and embedding model, available once background init completes.
 struct DbReady {
-    conn: Arc<libsql::Connection>,
+    conn: Arc<Connection>,
     embedder: Arc<Mutex<Embedder>>,
+    #[allow(dead_code)]
+    handle: db::AnyDb,
 }
 
 /// State of the database for two-phase startup.
@@ -503,7 +506,7 @@ impl TytoServer {
             .execute(
                 "INSERT INTO raw_captures (id, project_id, captured_at, tool_name, summary, raw_data) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                libsql::params![id, self.project_id.clone(), now, input.context, input.summary.clone(), input.summary.clone()],
+                (id, self.project_id.clone(), now, input.context, input.summary.clone(), input.summary.clone()),
             )
             .await
             .map(|_| format!("Staged note: {}", input.summary))
@@ -816,14 +819,14 @@ impl ServerHandler for TytoServer {
 
 /// Re-embed any memories that lack a vector for the current model.
 /// Runs as a background task; yields between batches to avoid starving MCP handlers.
-async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedder>>) {
+async fn reembed_stale(conn: Arc<Connection>, embedder: Arc<Mutex<Embedder>>) {
     const BATCH: i64 = 10;
     let model = crate::embed::model_id();
     let mut total = 0usize;
 
     loop {
         let batch: Vec<(String, String)> = {
-            let mut rows = match conn
+            let mut rows: turso::Rows = match conn
                 .query(
                     "SELECT m.id, m.title || ' ' || m.content
                      FROM memories m
@@ -833,7 +836,7 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
                          WHERE v.memory_id = m.id AND v.embed_model = ?1
                        )
                      LIMIT ?2",
-                    libsql::params![model.clone(), BATCH],
+                    (model.clone(), BATCH),
                 )
                 .await
             {
@@ -868,13 +871,13 @@ async fn reembed_stale(conn: Arc<libsql::Connection>, embedder: Arc<Mutex<Embedd
             let _ = conn
                 .execute(
                     "DELETE FROM memory_vectors WHERE memory_id = ?1",
-                    libsql::params![id.clone()],
+                    (id.clone(),),
                 )
                 .await;
             let _ = conn
                 .execute(
                     "INSERT INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
-                    libsql::params![id, model.clone(), blob],
+                    (id, model.clone(), blob),
                 )
                 .await;
             total += 1;
@@ -1038,20 +1041,17 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
         spawn_socket_listener(server.clone(), &config);
     }
 
-    // Start MCP transport immediately — Claude Code sees us as connected right away.
-    // Tool calls during the sync window return a "syncing" message instead of blocking.
-    let service = server.serve(stdio()).await?;
-    mlog!("tyto: ready (syncing database in background)");
-
     // Spawn background task: open memory DB, run migrations, load embedder.
     // Once ready, also start the code indexer as a nested background task.
     let ready_file_bg = ready_file.clone();
     let config_for_idx = config.clone();
+    let db_tx_clone = db_tx.clone();
+    let idx_tx_clone = idx_tx.clone();
     tokio::spawn(async move {
         match init_db_and_embedder(&config).await {
             Ok(ready) => {
                 let embedder_for_idx = Arc::clone(&ready.embedder);
-                let _ = db_tx.send(DbState::Ready(Arc::new(ready)));
+                let _ = db_tx_clone.send(DbState::Ready(Arc::new(ready)));
                 if is_primary {
                     let _ = std::fs::write(&ready_file_bg, "");
                 }
@@ -1070,7 +1070,7 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
                         match index::open(&db_path, project_root.clone(), git_history, Arc::clone(&embedder_for_idx)).await {
                             Ok(idx_ready) => {
                                 let idx_ready = Arc::new(idx_ready);
-                                let _ = idx_tx.send(index::IndexState::Ready(Arc::clone(&idx_ready)));
+                                let _ = idx_tx_clone.send(index::IndexState::Ready(Arc::clone(&idx_ready)));
                                 mlog!("tyto: code index ready, starting background indexing...");
                                 let conn = Arc::clone(&idx_ready.conn);
                                 let emb = Arc::clone(&embedder_for_idx);
@@ -1092,23 +1092,28 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
                                 );
                             }
                             Err(e) => {
-                                mlog!("tyto: code index open failed: {e:#}");
-                                let _ = idx_tx.send(index::IndexState::Failed(format!("{e:#}")));
+                                mlog!("tyto: code index open failed (continuing without indexing): {e:#}");
+                                let _ = idx_tx_clone.send(index::IndexState::Disabled);
                             }
                         }
                     });
                 } else {
-                    let _ = idx_tx.send(index::IndexState::Disabled);
+                    let _ = idx_tx_clone.send(index::IndexState::Disabled);
                     mlog!("tyto: code indexing disabled in config");
                 }
             }
             Err(e) => {
                 mlog!("tyto: database init failed: {e:#}");
-                let _ = db_tx.send(DbState::Failed(format!("{e:#}")));
-                let _ = idx_tx.send(index::IndexState::Disabled);
+                let _ = db_tx_clone.send(DbState::Failed(format!("{e:#}")));
+                let _ = idx_tx_clone.send(index::IndexState::Disabled);
             }
         }
     });
+
+    // Start MCP transport immediately — Claude Code sees us as connected right away.
+    // Tool calls during the sync window return a "syncing" message instead of blocking.
+    let service = server.serve(stdio()).await?;
+    mlog!("tyto: ready (syncing database in background)");
 
     // Wait for client disconnect, shutdown signal, or a permanent DB init failure.
     // DB init failure is re-raised as an error so run() writes it to crash.log.
@@ -1233,6 +1238,7 @@ async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
     mlog!("tyto: opening database...");
     let db = Db::open(config).await?;
     let conn = Arc::new(db.conn);
+    let handle = db.handle;
 
     // In replica mode, compact any stale WAL from the previous session before
     // running migrations. A dirty WAL can hide tables that exist in Turso,
@@ -1241,9 +1247,9 @@ async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
     // post-sync snapshot is the authoritative starting state.
     // Runs after sync (inside open_replica_with_recovery) has completed, so
     // there is no concurrent sync to conflict with.
-    if matches!(config.memory.storage.remote_mode, RemoteMode::Replica) {
+    if let db::AnyDb::Synced(ref sync_db) = handle {
         let t_cp = std::time::Instant::now();
-        match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").await {
+        match sync_db.checkpoint().await {
             Ok(_) => tracing::debug!(elapsed_ms = t_cp.elapsed().as_millis(), "WAL checkpoint"),
             Err(e) => mlog!("tyto: WAL checkpoint failed (non-fatal): {e:#}"),
         }
@@ -1257,7 +1263,7 @@ async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
     // In replica mode, a stale WAL from a previous session can overlay the main
     // db file after sync, causing "no such table" for tables that exist in Turso.
     // Purge and re-open once to force a clean full re-sync.
-    let conn = if let Err(ref e) = mig_result {
+    let (conn, handle) = if let Err(ref e) = mig_result {
         let is_replica = matches!(
             config.memory.storage.remote_mode,
             RemoteMode::Replica
@@ -1270,12 +1276,12 @@ async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
             let conn = Arc::new(db.conn);
             mlog!("tyto: running migrations (retry)...");
             migrations::run(&conn).await?;
-            conn
+            (conn, db.handle)
         } else {
             return Err(mig_result.unwrap_err());
         }
     } else {
-        conn
+        (conn, handle)
     };
 
     mlog!("tyto: loading embedding model (first run will download ~22MB)...");
@@ -1284,12 +1290,33 @@ async fn init_db_and_embedder(config: &Config) -> Result<DbReady> {
     tracing::debug!(elapsed_ms = t_model.elapsed().as_millis(), "embedder load");
     tracing::debug!(elapsed_ms = t_init.elapsed().as_millis(), "init_db_and_embedder total");
 
+    // Start manual background sync for replicas.
+    if let db::AnyDb::Synced(ref sync_db) = handle {
+        let sync_db = sync_db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                // Periodic push/pull/checkpoint to stay in sync and keep WAL small.
+                if let Err(e) = sync_db.push().await {
+                    tracing::error!(error = %e, "replica push failed");
+                }
+                if let Err(e) = sync_db.pull().await {
+                    tracing::error!(error = %e, "replica pull failed");
+                }
+                if let Err(e) = sync_db.checkpoint().await {
+                    tracing::error!(error = %e, "replica checkpoint failed");
+                }
+            }
+        });
+    }
+
     // Re-embed any memories whose vectors were generated by a different model.
     // Runs in background; inject (BM25-only) and search (model-filtered) degrade
     // gracefully while this is in progress.
     tokio::spawn(reembed_stale(Arc::clone(&conn), Arc::clone(&embedder)));
 
-    Ok(DbReady { conn, embedder })
+    Ok(DbReady { conn, embedder, handle })
 }
 
 async fn shutdown_signal() {

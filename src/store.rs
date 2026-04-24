@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use libsql::params;
+use turso::Connection;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -44,7 +44,7 @@ pub fn new_write_lock() -> WriteLock {
 /// `embedding` must be pre-computed by the caller before acquiring any locks,
 /// so the (potentially slow) embedding step does not block concurrent tool calls.
 pub async fn store_memory(
-    conn: &libsql::Connection,
+    conn: &Connection,
     embedding: Vec<f32>,
     lock: &WriteLock,
     req: StoreRequest,
@@ -78,7 +78,7 @@ pub async fn store_memory(
                AND session_id   = ?2
                AND (julianday(?3) - julianday(created_at)) * 86400 < ?4
              LIMIT 1",
-            params![hash.clone(), req.session_id.clone(), now_str.clone(), dedup_window_secs],
+            (hash.clone(), req.session_id.clone(), now_str.clone(), dedup_window_secs),
         )
         .await?
         .next()
@@ -93,7 +93,7 @@ pub async fn store_memory(
         let existing: Option<String> = conn
             .query(
                 "SELECT id FROM memories WHERE project_id = ?1 AND topic_key = ?2 LIMIT 1",
-                params![req.project_id.clone(), topic_key.clone()],
+                (req.project_id.clone(), topic_key.clone()),
             )
             .await?
             .next()
@@ -108,7 +108,7 @@ pub async fn store_memory(
                      content_hash = ?6, updated_at = ?7, source = COALESCE(?8, source),
                      pinned = COALESCE(?9, pinned)
                  WHERE id = ?10",
-                params![
+                (
                     content,
                     title,
                     tags_json,
@@ -118,17 +118,17 @@ pub async fn store_memory(
                     now_str.clone(),
                     req.source.clone(),
                     pinned_val,
-                    id.clone()
-                ],
+                    id.clone(),
+                ),
             )
             .await?;
 
             // Replace embedding
-            conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?1", params![id.clone()])
+            conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?1", (id.clone(),))
                 .await?;
             conn.execute(
                 "INSERT INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
-                params![id.clone(), embed::model_id(), embedding_blob],
+                (id.clone(), embed::model_id(), embedding_blob),
             )
             .await?;
 
@@ -144,18 +144,18 @@ pub async fn store_memory(
             (id, project_id, topic_key, type, title, content, facts, tags,
              importance, session_id, source, pinned, created_at, updated_at, content_hash)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'realtime'), COALESCE(?12, 0), ?13, ?14, ?15)",
-        params![
+        (
             id.clone(), req.project_id, req.topic_key, req.memory_type,
             title, content, facts_json, tags_json,
             importance, req.session_id, req.source, pinned_val,
             now_str.clone(), now_str, hash
-        ],
+        ),
     )
     .await?;
 
     conn.execute(
         "INSERT INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
-        params![id.clone(), embed::model_id(), embedding_blob],
+        (id.clone(), embed::model_id(), embedding_blob),
     )
     .await?;
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use libsql::{params, params_from_iter};
+use turso::{params_from_iter, Connection, Value};
 use std::collections::HashMap;
 
 use crate::embed;
@@ -98,12 +98,12 @@ pub struct FullMemory {
     pub updated_at: String,
 }
 
-/// Hybrid RRF search combining vector similarity and BM25 full-text.
+/// Hybrid RRF search combining vector similarity and keyword search.
 ///
 /// `embedding` must be pre-computed by the caller before any locks are held,
 /// so the embedding step does not block concurrent tool calls.
 pub async fn search(
-    conn: &libsql::Connection,
+    conn: &Connection,
     embedding: Vec<f32>,
     query: &str,
     project_id: &str,
@@ -113,7 +113,7 @@ pub async fn search(
     let blob = embed::floats_to_blob(&embedding);
 
     // Stream A: vector search (filtered to current model only; memories lacking a
-    // current-model vector fall through to BM25 gracefully during re-embedding).
+    // current-model vector fall through to keyword search gracefully during re-embedding).
     // Also captures the top cosine distance as an absolute relevance gate: if the
     // nearest neighbour is too far away, the query has no relevant memories at all.
     const MAX_COSINE_DIST: f64 = 0.38;
@@ -128,7 +128,7 @@ pub async fn search(
                  WHERE m.project_id = ?1 AND m.status = 'active' AND v.embed_model = ?2
                  ORDER BY dist
                  LIMIT ?4",
-                params![project_id.to_string(), embed::model_id(), blob, (limit * 2) as i64],
+                (project_id.to_string(), embed::model_id(), blob, (limit * 2) as i64),
             )
             .await?;
         let mut rank = 0usize;
@@ -148,36 +148,34 @@ pub async fn search(
         }
     }
 
-    // Stream B: BM25 full-text search
-    let mut bm25_ranks: HashMap<String, usize> = HashMap::new();
+    // Stream B: Keyword search (fallback for FTS5 which is not supported by Limbo yet)
+    let mut kw_ranks: HashMap<String, usize> = HashMap::new();
     {
         let t = std::time::Instant::now();
-        let fts_query = build_fts_query(query);
+        let kw_query = format!("%{}%", query);
         let mut rows = conn
             .query(
-                "SELECT m.id
-                 FROM memories m
-                 JOIN memories_fts ON memories_fts.rowid = m.rowid
-                 WHERE memories_fts MATCH ?1
-                   AND m.project_id = ?2
-                   AND m.status = 'active'
-                 ORDER BY bm25(memories_fts)
+                "SELECT id
+                 FROM memories
+                 WHERE (title LIKE ?1 OR content LIKE ?1 OR facts LIKE ?1)
+                   AND project_id = ?2
+                   AND status = 'active'
                  LIMIT ?3",
-                params![fts_query, project_id.to_string(), (limit * 2) as i64],
+                (kw_query, project_id.to_string(), (limit * 2) as i64),
             )
             .await?;
         let mut rank = 0usize;
         while let Some(row) = rows.next().await? {
             let id: String = row.get(0)?;
-            bm25_ranks.insert(id, rank);
+            kw_ranks.insert(id, rank);
             rank += 1;
         }
-        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), results = bm25_ranks.len(), "bm25 search");
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), results = kw_ranks.len(), "keyword search");
     }
 
     // Collect all candidate IDs
     let mut all_ids: Vec<String> = vector_ranks.keys().cloned().collect();
-    for id in bm25_ranks.keys() {
+    for id in kw_ranks.keys() {
         if !vector_ranks.contains_key(id) {
             all_ids.push(id.clone());
         }
@@ -198,7 +196,7 @@ pub async fn search(
          FROM memories WHERE id IN ({placeholders}) AND status = 'active'"
     );
     let mut rows = conn
-        .query(&meta_sql, params_from_iter(all_ids.iter().cloned()))
+        .query(&meta_sql, params_from_iter(all_ids.iter().cloned().map(Value::Text)))
         .await?;
 
     let mut scored: Vec<CompactResult> = Vec::new();
@@ -222,12 +220,12 @@ pub async fn search(
             .get(&id)
             .map(|&r| 1.0 / (RRF_K + r as f64))
             .unwrap_or(0.0);
-        let rrf_b = bm25_ranks
+        let rrf_kw = kw_ranks
             .get(&id)
             .map(|&r| 1.0 / (RRF_K + r as f64))
             .unwrap_or(0.0);
         let boost = source_boost(query, &memory_type);
-        let score = (rrf_v + rrf_b) * ret * boost;
+        let score = (rrf_v + rrf_kw) * ret * boost;
 
         scored.push(CompactResult { id, memory_type, title, created_at, importance, score, content_len: content_len as usize, facts_json, tags_json });
     }
@@ -243,7 +241,7 @@ pub async fn search(
 /// Fetch multiple memories in a single query. Returns only found memories;
 /// callers can detect missing IDs by comparing against the input set.
 pub async fn get_full_batch(
-    conn: &libsql::Connection,
+    conn: &Connection,
     ids: &[String],
     project_id: &str,
 ) -> Result<Vec<FullMemory>> {
@@ -256,8 +254,8 @@ pub async fn get_full_batch(
                 importance, access_count, pinned, status, created_at, updated_at
          FROM memories WHERE id IN ({placeholders}) AND project_id = ?"
     );
-    let select_params: Vec<libsql::Value> = ids.iter().cloned().map(libsql::Value::Text)
-        .chain(std::iter::once(libsql::Value::Text(project_id.to_string())))
+    let select_params: Vec<Value> = ids.iter().cloned().map(Value::Text)
+        .chain(std::iter::once(Value::Text(project_id.to_string())))
         .collect();
     let mut rows = conn
         .query(&sql, params_from_iter(select_params))
@@ -287,9 +285,9 @@ pub async fn get_full_batch(
         "UPDATE memories SET access_count = access_count + 1, last_accessed = ? \
          WHERE id IN ({placeholders}) AND project_id = ?"
     );
-    let update_params: Vec<libsql::Value> = std::iter::once(libsql::Value::Text(Utc::now().to_rfc3339()))
-        .chain(ids.iter().cloned().map(libsql::Value::Text))
-        .chain(std::iter::once(libsql::Value::Text(project_id.to_string())))
+    let update_params: Vec<Value> = std::iter::once(Value::Text(Utc::now().to_rfc3339()))
+        .chain(ids.iter().cloned().map(Value::Text))
+        .chain(std::iter::once(Value::Text(project_id.to_string())))
         .collect();
     let _ = conn.execute(&update_sql, params_from_iter(update_params)).await;
 
@@ -299,7 +297,7 @@ pub async fn get_full_batch(
 /// Fetch stored embedding vectors for a batch of memory IDs.
 /// Returns `(memory_id, embedding)` pairs for use in per-vector similarity search.
 pub async fn fetch_embeddings(
-    conn: &libsql::Connection,
+    conn: &Connection,
     ids: &[String],
     project_id: &str,
 ) -> Result<Vec<(String, Vec<f32>)>> {
@@ -312,8 +310,8 @@ pub async fn fetch_embeddings(
          JOIN memories m ON m.id = mv.memory_id \
          WHERE mv.memory_id IN ({placeholders}) AND m.project_id = ?"
     );
-    let params: Vec<libsql::Value> = ids.iter().cloned().map(libsql::Value::Text)
-        .chain(std::iter::once(libsql::Value::Text(project_id.to_string())))
+    let params: Vec<Value> = ids.iter().cloned().map(Value::Text)
+        .chain(std::iter::once(Value::Text(project_id.to_string())))
         .collect();
     let mut rows = conn.query(&sql, params_from_iter(params)).await?;
     let mut result = Vec::new();
@@ -326,7 +324,7 @@ pub async fn fetch_embeddings(
 }
 
 /// Pin or unpin a batch of memories in a single query. Returns the number of rows updated.
-pub async fn pin_batch(conn: &libsql::Connection, ids: &[String], project_id: &str, pin: bool) -> Result<u64> {
+pub async fn pin_batch(conn: &Connection, ids: &[String], project_id: &str, pin: bool) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
@@ -334,15 +332,15 @@ pub async fn pin_batch(conn: &libsql::Connection, ids: &[String], project_id: &s
     let sql = format!(
         "UPDATE memories SET pinned = ? WHERE id IN ({placeholders}) AND status != 'deleted' AND project_id = ?"
     );
-    let params: Vec<libsql::Value> = std::iter::once(libsql::Value::Integer(if pin { 1 } else { 0 }))
-        .chain(ids.iter().cloned().map(libsql::Value::Text))
-        .chain(std::iter::once(libsql::Value::Text(project_id.to_string())))
+    let params: Vec<Value> = std::iter::once(Value::Integer(if pin { 1 } else { 0 }))
+        .chain(ids.iter().cloned().map(Value::Text))
+        .chain(std::iter::once(Value::Text(project_id.to_string())))
         .collect();
     Ok(conn.execute(&sql, params_from_iter(params)).await?)
 }
 
 /// Soft-delete a batch of memories in a single query. Returns the number of rows updated.
-pub async fn delete_batch(conn: &libsql::Connection, ids: &[String], project_id: &str) -> Result<u64> {
+pub async fn delete_batch(conn: &Connection, ids: &[String], project_id: &str) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
@@ -350,34 +348,31 @@ pub async fn delete_batch(conn: &libsql::Connection, ids: &[String], project_id:
     let sql = format!(
         "UPDATE memories SET status = 'deleted' WHERE id IN ({placeholders}) AND project_id = ?"
     );
-    let params: Vec<libsql::Value> = ids.iter().cloned().map(libsql::Value::Text)
-        .chain(std::iter::once(libsql::Value::Text(project_id.to_string())))
+    let params: Vec<Value> = std::iter::once(Value::Text(project_id.to_string()))
+        .chain(ids.into_iter().map(|s| Value::Text(s.clone())))
         .collect();
     Ok(conn.execute(&sql, params_from_iter(params)).await?)
 }
 
-/// BM25-only search: no embedding required. Used by inject --type prompt to avoid
-/// loading the ONNX model on every UserPromptSubmit hook invocation.
+/// Keyword-only search: no embedding required. Fallback for FTS5.
 pub async fn search_bm25(
-    conn: &libsql::Connection,
+    conn: &Connection,
     query: &str,
     project_id: &str,
     limit: usize,
 ) -> Result<Vec<CompactResult>> {
     let now = Utc::now();
-    let fts_query = build_fts_query(query);
+    let kw_query = format!("%{}%", query);
     let mut rows = conn
         .query(
             "SELECT m.id, m.type, m.title, m.created_at, m.importance,
                     m.access_count, m.last_accessed, m.source, length(m.content), m.facts, m.tags
              FROM memories m
-             JOIN memories_fts ON memories_fts.rowid = m.rowid
-             WHERE memories_fts MATCH ?1
+             WHERE (m.title LIKE ?1 OR m.content LIKE ?1 OR m.facts LIKE ?1)
                AND m.project_id = ?2
                AND m.status = 'active'
-             ORDER BY bm25(memories_fts)
              LIMIT ?3",
-            params![fts_query, project_id.to_string(), limit as i64],
+            (kw_query, project_id.to_string(), limit as i64),
         )
         .await?;
 
@@ -410,7 +405,7 @@ pub async fn search_bm25(
 }
 
 pub async fn list(
-    conn: &libsql::Connection,
+    conn: &Connection,
     project_id: &str,
     filter_type: Option<&str>,
     filter_tags: &[String],
@@ -439,13 +434,13 @@ pub async fn list(
     let mut rows = if let Some(ref tp) = type_param {
         conn.query(
             &sql,
-            params![project_id.to_string(), min_importance, ceiling, tp.clone()],
+            (project_id.to_string(), min_importance, ceiling, tp.clone()),
         )
         .await?
     } else {
         conn.query(
             &sql,
-            params![project_id.to_string(), min_importance, ceiling],
+            (project_id.to_string(), min_importance, ceiling),
         )
         .await?
     };
@@ -499,6 +494,7 @@ pub async fn list(
     Ok(results)
 }
 
+#[allow(dead_code)]
 fn build_fts_query(query: &str) -> String {
     // FTS5 tokens may only contain alphanumerics and underscores.
     // Strip other characters (e.g. "." in "install.rs") to avoid syntax errors.
@@ -532,7 +528,7 @@ pub struct StaleMemory {
 
 /// Return memories eligible for eviction: not pinned, older than STALE_MIN_AGE_DAYS, retention score below threshold.
 pub async fn list_stale(
-    conn: &libsql::Connection,
+    conn: &Connection,
     project_id: &str,
 ) -> Result<Vec<StaleMemory>> {
     let now = Utc::now();
@@ -545,7 +541,7 @@ pub async fn list_stale(
                AND status = 'active'
                AND pinned = 0
                AND created_at <= ?2",
-            params![project_id.to_string(), cutoff],
+            (project_id.to_string(), cutoff),
         )
         .await?;
 
@@ -577,7 +573,7 @@ pub async fn list_stale(
 
 /// Hard-delete all stale memories (those returned by list_stale). Returns count deleted.
 pub async fn evict_stale(
-    conn: &libsql::Connection,
+    conn: &Connection,
     project_id: &str,
 ) -> Result<u64> {
     let candidates = list_stale(conn, project_id).await?;
@@ -590,8 +586,8 @@ pub async fn evict_stale(
     let sql = format!(
         "DELETE FROM memories WHERE project_id = ?1 AND id IN ({placeholders})"
     );
-    let params: Vec<libsql::Value> = std::iter::once(libsql::Value::Text(project_id.to_string()))
-        .chain(ids.into_iter().map(libsql::Value::Text))
+    let params: Vec<Value> = std::iter::once(Value::Text(project_id.to_string()))
+        .chain(ids.into_iter().map(Value::Text))
         .collect();
     Ok(conn.execute(&sql, params_from_iter(params)).await?)
 }

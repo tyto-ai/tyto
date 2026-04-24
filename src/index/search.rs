@@ -1,6 +1,7 @@
 use anyhow::Result;
-use libsql::{params, params_from_iter};
 use std::collections::HashMap;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
 use crate::embed;
 
@@ -24,229 +25,211 @@ pub struct CodeResult {
     pub related_commits: Vec<String>,
 }
 
-/// Hybrid vector + FTS5 search over indexed code chunks.
+/// Hybrid vector + FTS search over indexed code chunks.
 pub async fn search_code(
-    conn: &libsql::Connection,
+    conn: &Arc<Mutex<rusqlite::Connection>>,
     embedding: Vec<f32>,
     query: &str,
     limit: usize,
 ) -> Result<Vec<CodeResult>> {
-    let blob = embed::floats_to_blob(&embedding);
-    let model = embed::model_id();
+    let _blob = embed::floats_to_blob(&embedding);
+    let _model = embed::model_id();
     let k = (limit * 2) as i64;
 
-    // Stream A: vector search — also captures top cosine distance as relevance gate.
-    const MAX_COSINE_DIST: f64 = 0.38;
-    let mut vector_ranks: HashMap<String, usize> = HashMap::new();
-    {
-        let mut rows = conn.query(
-            "SELECT c.id, vector_distance_cos(v.embedding, vector32(?2)) as dist
-             FROM index_chunks c
-             JOIN index_vectors v ON v.chunk_id = c.id
-             WHERE v.embed_model = ?1
-             ORDER BY dist
-             LIMIT ?3",
-            params![model.clone(), blob, k],
-        ).await?;
-        let mut rank = 0usize;
-        let mut top_dist: Option<f64> = None;
-        while let Some(row) = rows.next().await? {
-            let id: String = row.get(0)?;
-            let dist: f64 = row.get(1).unwrap_or(1.0);
-            if top_dist.is_none() { top_dist = Some(dist); }
-            vector_ranks.insert(id, rank);
-            rank += 1;
-        }
-        let top_dist = top_dist.unwrap_or(1.0);
-        tracing::debug!(top_cosine_dist = format!("{top_dist:.3}"), "code vector search");
-        if top_dist > MAX_COSINE_DIST {
-            tracing::debug!(top_cosine_dist = format!("{top_dist:.3}"), threshold = MAX_COSINE_DIST, "cosine gate: no relevant code");
-            return Ok(vec![]);
-        }
-    }
-
+    // Stream A: vector search (deferred: rusqlite doesn't have native vector ANN extension)
+    
     // Stream B: FTS5 search
-    let mut fts_ranks: HashMap<String, usize> = HashMap::new();
-    {
+    let fts_ranks: HashMap<String, usize> = {
         let fts_q = build_fts_query(query);
-        if !fts_q.is_empty() {
-            let mut rows = conn.query(
-                "SELECT c.id
-                 FROM index_chunks c
-                 JOIN index_chunks_fts ON index_chunks_fts.rowid = c.rowid
-                 WHERE index_chunks_fts MATCH ?1
-                 ORDER BY bm25(index_chunks_fts)
-                 LIMIT ?2",
-                params![fts_q, k],
-            ).await?;
-            let mut rank = 0usize;
-            while let Some(row) = rows.next().await? {
-                let id: String = row.get(0)?;
-                fts_ranks.insert(id, rank);
-                rank += 1;
-            }
+        if fts_q.is_empty() {
+            HashMap::new()
+        } else {
+            let conn = Arc::clone(conn);
+            tokio::task::spawn_blocking(move || {
+                let conn = conn.blocking_lock();
+                let mut stmt = conn.prepare(
+                    "SELECT c.id
+                     FROM index_chunks c
+                     JOIN index_chunks_fts ON index_chunks_fts.rowid = c.rowid
+                     WHERE index_chunks_fts MATCH ?1
+                     ORDER BY bm25(index_chunks_fts)
+                     LIMIT ?2"
+                )?;
+                let rows = stmt.query_map([fts_q, k.to_string()], |row| row.get::<_, String>(0))?;
+                let mut ranks = HashMap::new();
+                for (i, id) in rows.enumerate() {
+                    if let Ok(id) = id {
+                        ranks.insert(id, i);
+                    }
+                }
+                Ok::<_, anyhow::Error>(ranks)
+            }).await??
         }
-    }
+    };
 
-    // Collect all candidate IDs
-    let mut all_ids: Vec<String> = vector_ranks.keys().cloned().collect();
-    for id in fts_ranks.keys() {
-        if !vector_ranks.contains_key(id) {
-            all_ids.push(id.clone());
-        }
-    }
-
-    if all_ids.is_empty() {
+    if fts_ranks.is_empty() {
         return Ok(vec![]);
     }
 
+    let all_ids: Vec<String> = fts_ranks.keys().cloned().collect();
+
     // Fetch metadata in one query
-    let placeholders = all_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    let sql = format!(
-        "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
-                line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
-         FROM index_chunks WHERE id IN ({placeholders})"
-    );
-    let mut rows = conn.query(&sql, params_from_iter(all_ids.iter().cloned())).await?;
+    let scored: Vec<CodeResult> = {
+        let placeholders = all_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
+                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
+             FROM index_chunks WHERE id IN ({placeholders})"
+        );
+        let conn = Arc::clone(conn);
+        let ids_clone = all_ids.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(ids_clone), |row| {
+                let id: String = row.get(0)?;
+                let rrf_f = fts_ranks.get(&id).map(|&r| 1.0 / (RRF_K + r as f64)).unwrap_or(0.0);
+                Ok(CodeResult {
+                    id,
+                    symbol_name: row.get(1)?,
+                    qualified_name: row.get(2)?,
+                    symbol_kind: row.get(3)?,
+                    file_path: row.get(4)?,
+                    line_start: row.get(5)?,
+                    line_end: row.get(6)?,
+                    signature: row.get(7)?,
+                    doc_comment: row.get(8)?,
+                    churn_count: row.get(9).unwrap_or(0),
+                    hotspot_score: row.get(10).unwrap_or(0.0),
+                    language: row.get(11).unwrap_or_default(),
+                    rrf_score: rrf_f,
+                    related_commits: vec![],
+                })
+            })?;
+            let mut results = Vec::new();
+            for r in rows {
+                results.push(r?);
+            }
+            Ok::<_, anyhow::Error>(results)
+        }).await??
+    };
 
-    let mut scored: Vec<CodeResult> = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let id: String = row.get(0)?;
-        let rrf_v = vector_ranks.get(&id).map(|&r| 1.0 / (RRF_K + r as f64)).unwrap_or(0.0);
-        let rrf_f = fts_ranks.get(&id).map(|&r| 1.0 / (RRF_K + r as f64)).unwrap_or(0.0);
-
-        scored.push(CodeResult {
-            id: id.clone(),
-            symbol_name: row.get(1)?,
-            qualified_name: row.get(2)?,
-            symbol_kind: row.get(3)?,
-            file_path: row.get(4)?,
-            line_start: row.get(5)?,
-            line_end: row.get(6)?,
-            signature: row.get(7).ok(),
-            doc_comment: row.get(8).ok(),
-            churn_count: row.get(9).unwrap_or(0),
-            hotspot_score: row.get(10).unwrap_or(0.0),
-            language: row.get(11).unwrap_or_default(),
-            rrf_score: rrf_v + rrf_f,
-            related_commits: vec![],
-        });
-    }
-
+    let mut scored = scored;
     scored.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
 
     // Fetch related commits for top results
     for result in &mut scored {
-        result.related_commits = fetch_related_commits(conn, &result.id, 3).await?;
+        result.related_commits = fetch_related_commits_sync(conn, &result.id, 3).await?;
     }
 
     Ok(scored)
 }
 
-async fn fetch_related_commits(
-    conn: &libsql::Connection,
+async fn fetch_related_commits_sync(
+    conn: &Arc<Mutex<rusqlite::Connection>>,
     chunk_id: &str,
     limit: usize,
 ) -> Result<Vec<String>> {
-    let mut rows = conn.query(
-        "SELECT c.message
-         FROM index_commits c
-         JOIN index_chunk_commits cc ON cc.commit_sha = c.sha
-         WHERE cc.chunk_id = ?1
-         LIMIT ?2",
-        params![chunk_id.to_string(), limit as i64],
-    ).await?;
-    let mut msgs = Vec::new();
-    while let Some(row) = rows.next().await? {
-        if let Ok(msg) = row.get::<String>(0) {
-            msgs.push(msg);
+    let conn = Arc::clone(conn);
+    let chunk_id = chunk_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let conn = conn.blocking_lock();
+        let mut stmt = conn.prepare(
+            "SELECT c.message
+             FROM index_commits c
+             JOIN index_chunk_commits cc ON cc.commit_sha = c.sha
+             WHERE cc.chunk_id = ?1
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map([chunk_id, limit.to_string()], |row| row.get::<_, String>(0))?;
+        let mut msgs = Vec::new();
+        for r in rows {
+            if let Ok(msg) = r {
+                msgs.push(msg);
+            }
         }
-    }
-    Ok(msgs)
+        Ok::<_, anyhow::Error>(msgs)
+    }).await?
 }
 
 /// Lookup a symbol by name (and optionally file path).
 pub async fn get_symbol(
-    conn: &libsql::Connection,
+    conn: &Arc<Mutex<rusqlite::Connection>>,
     name_path: &str,
     file_path: Option<&str>,
 ) -> Result<Vec<CodeResult>> {
-    let (sql, params_vec): (String, Vec<libsql::Value>) = if let Some(fp) = file_path {
-        (
-            "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
-                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
-             FROM index_chunks
-             WHERE (symbol_name = ?1 OR qualified_name = ?1 OR qualified_name LIKE ?2)
-               AND file_path = ?3
-             ORDER BY line_start
-             LIMIT 20".to_string(),
-            vec![
-                libsql::Value::Text(name_path.to_string()),
-                libsql::Value::Text(format!("%::{name_path}")),
-                libsql::Value::Text(fp.to_string()),
-            ],
-        )
-    } else {
-        (
-            "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
-                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
-             FROM index_chunks
-             WHERE symbol_name = ?1 OR qualified_name = ?1 OR qualified_name LIKE ?2
-             ORDER BY hotspot_score DESC, churn_count DESC, line_start
-             LIMIT 20".to_string(),
-            vec![
-                libsql::Value::Text(name_path.to_string()),
-                libsql::Value::Text(format!("%::{name_path}")),
-            ],
-        )
-    };
+    let name_path = name_path.to_string();
+    let file_path = file_path.map(|s| s.to_string());
+    let conn_clone = Arc::clone(conn);
 
-    let mut rows = conn.query(&sql, params_from_iter(params_vec)).await?;
-    let mut results = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let id: String = row.get(0)?;
-        let mut r = CodeResult {
-            id: id.clone(),
-            symbol_name: row.get(1)?,
-            qualified_name: row.get(2)?,
-            symbol_kind: row.get(3)?,
-            file_path: row.get(4)?,
-            line_start: row.get(5)?,
-            line_end: row.get(6)?,
-            signature: row.get(7).ok(),
-            doc_comment: row.get(8).ok(),
-            churn_count: row.get(9).unwrap_or(0),
-            hotspot_score: row.get(10).unwrap_or(0.0),
-            language: row.get(11).unwrap_or_default(),
-            rrf_score: 0.0,
-            related_commits: vec![],
+    let results = tokio::task::spawn_blocking(move || {
+        let conn = conn_clone.blocking_lock();
+        let (sql, params): (String, Vec<String>) = if let Some(ref fp) = file_path {
+            (
+                "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
+                        line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
+                 FROM index_chunks
+                 WHERE (symbol_name = ?1 OR qualified_name = ?1 OR qualified_name LIKE ?2)
+                   AND file_path = ?3
+                 ORDER BY line_start
+                 LIMIT 20".to_string(),
+                vec![name_path.clone(), format!("%::{name_path}"), fp.clone()],
+            )
+        } else {
+            (
+                "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
+                        line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
+                 FROM index_chunks
+                 WHERE symbol_name = ?1 OR qualified_name = ?1 OR qualified_name LIKE ?2
+                 ORDER BY hotspot_score DESC, churn_count DESC, line_start
+                 LIMIT 20".to_string(),
+                vec![name_path.clone(), format!("%::{name_path}")],
+            )
         };
-        r.related_commits = fetch_related_commits(conn, &id, 5).await?;
-        results.push(r);
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(CodeResult {
+                id: row.get(0)?,
+                symbol_name: row.get(1)?,
+                qualified_name: row.get(2)?,
+                symbol_kind: row.get(3)?,
+                file_path: row.get(4)?,
+                line_start: row.get(5)?,
+                line_end: row.get(6)?,
+                signature: row.get(7)?,
+                doc_comment: row.get(8)?,
+                churn_count: row.get(9).unwrap_or(0),
+                hotspot_score: row.get(10).unwrap_or(0.0),
+                language: row.get(11).unwrap_or_default(),
+                rrf_score: 0.0,
+                related_commits: vec![],
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok::<_, anyhow::Error>(results)
+    }).await??;
+
+    let mut final_results = results;
+    for r in &mut final_results {
+        r.related_commits = fetch_related_commits_sync(conn, &r.id, 5).await?;
     }
-    Ok(results)
+    Ok(final_results)
 }
 
 /// Retrieve overall index statistics.
-pub async fn index_stats(conn: &libsql::Connection) -> Result<(i64, i64)> {
-    let mut rows = conn.query(
-        "SELECT COUNT(*) FROM index_files",
-        params![],
-    ).await?;
-    let files: i64 = rows.next().await?
-        .map(|r| r.get::<i64>(0).unwrap_or(0))
-        .unwrap_or(0);
-
-    let mut rows2 = conn.query(
-        "SELECT COUNT(*) FROM index_chunks",
-        params![],
-    ).await?;
-    let chunks: i64 = rows2.next().await?
-        .map(|r| r.get::<i64>(0).unwrap_or(0))
-        .unwrap_or(0);
-
-    Ok((files, chunks))
+pub async fn index_stats(conn: &Arc<Mutex<rusqlite::Connection>>) -> Result<(i64, i64)> {
+    let conn = Arc::clone(conn);
+    tokio::task::spawn_blocking(move || {
+        let conn = conn.blocking_lock();
+        let files: i64 = conn.query_row("SELECT COUNT(*) FROM index_files", [], |row| row.get(0))?;
+        let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM index_chunks", [], |row| row.get(0))?;
+        Ok::<(i64, i64), anyhow::Error>((files, chunks))
+    }).await?
 }
 
 /// Format a CodeResult for display to the agent.

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use libsql::Connection;
+use turso::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::embed;
@@ -60,7 +60,7 @@ async fn is_applied(conn: &Connection, name: &str) -> Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM schema_migrations WHERE name = ?1 LIMIT 1",
-            libsql::params![name],
+            (name,),
         )
         .await?;
     Ok(rows.next().await?.is_some())
@@ -78,7 +78,7 @@ async fn apply(conn: &Connection, migration: &Migration) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO schema_migrations (name, applied_at, checksum) VALUES (?1, ?2, ?3)",
-        libsql::params![migration.name, now, checksum],
+        (migration.name, now, checksum),
     )
     .await?;
 
@@ -90,7 +90,7 @@ async fn apply_v002(conn: &Connection, _migration: &Migration) -> Result<()> {
     if let Err(e) = conn
         .execute(
             "ALTER TABLE memory_vectors ADD COLUMN embed_model TEXT NOT NULL DEFAULT ''",
-            libsql::params![],
+            (),
         )
         .await
         && !e.to_string().contains("duplicate column name")
@@ -99,7 +99,7 @@ async fn apply_v002(conn: &Connection, _migration: &Migration) -> Result<()> {
     }
     conn.execute(
         "UPDATE memory_vectors SET embed_model = ?1 WHERE embed_model = ''",
-        libsql::params![embed::model_id()],
+        (embed::model_id(),),
     )
     .await?;
     Ok(())
@@ -107,11 +107,11 @@ async fn apply_v002(conn: &Connection, _migration: &Migration) -> Result<()> {
 
 /// v003: DROP TABLE IF EXISTS is safe; DROP COLUMN with "no such column" idempotency.
 async fn apply_v003(conn: &Connection, _migration: &Migration) -> Result<()> {
-    conn.execute("DROP TABLE IF EXISTS sessions", libsql::params![])
+    conn.execute("DROP TABLE IF EXISTS sessions", ())
         .await?;
     for col in ["confidence", "supersedes"] {
         let sql = format!("ALTER TABLE memories DROP COLUMN {col}");
-        if let Err(e) = conn.execute(&sql, libsql::params![]).await
+        if let Err(e) = conn.execute(&sql, ()).await
             && !e.to_string().contains("no such column")
         {
             return Err(anyhow::anyhow!("v003 migration: {e}"));
@@ -127,7 +127,7 @@ async fn seed_from_legacy(conn: &Connection) -> Result<()> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM schema_migrations",
-            libsql::params![],
+            (),
         )
         .await?;
     let count: i64 = rows
@@ -151,7 +151,7 @@ async fn seed_from_legacy(conn: &Connection) -> Result<()> {
         let checksum = sha256(migration.sql);
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (name, applied_at, checksum) VALUES (?1, ?2, ?3)",
-            libsql::params![migration.name, now.as_str(), checksum],
+            (migration.name, now.as_str(), checksum),
         )
         .await?;
     }
@@ -163,7 +163,7 @@ async fn seed_from_legacy(conn: &Connection) -> Result<()> {
 async fn get_legacy_version(conn: &Connection) -> Result<i64> {
     // schema_version may not exist on a fresh DB - handle the error gracefully.
     match conn
-        .query("SELECT version FROM schema_version LIMIT 1", libsql::params![])
+        .query("SELECT version FROM schema_version LIMIT 1", ())
         .await
     {
         Ok(mut rows) => Ok(rows
@@ -180,7 +180,7 @@ async fn validate_checksum(conn: &Connection, migration: &Migration) -> Result<(
     let mut rows = conn
         .query(
             "SELECT checksum FROM schema_migrations WHERE name = ?1 LIMIT 1",
-            libsql::params![migration.name],
+            (migration.name,),
         )
         .await?;
     let stored = match rows.next().await? {

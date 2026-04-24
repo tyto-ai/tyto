@@ -1,5 +1,4 @@
 use anyhow::Result;
-use libsql::params;
 
 use crate::{config::{Config, StorageMode}, db::Db, migrations, project_id};
 
@@ -33,7 +32,7 @@ pub async fn run(config: &Config) -> Result<()> {
     let project_count: i64 = conn
         .query(
             "SELECT COUNT(*) FROM memories WHERE status = 'active' AND project_id = ?1",
-            params![pid.clone()],
+            (pid.clone(),),
         )
         .await?
         .next()
@@ -44,7 +43,7 @@ pub async fn run(config: &Config) -> Result<()> {
     let last_stored: Option<String> = conn
         .query(
             "SELECT created_at FROM memories WHERE project_id = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![pid.clone()],
+            (pid.clone(),),
         )
         .await?
         .next()

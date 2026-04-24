@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use libsql::{Builder, Connection};
+use turso::{Builder, Connection, Value, params_from_iter};
 use crate::config::{StorageMode, RemoteMode, Config};
 
 pub async fn enable(
@@ -24,27 +24,37 @@ pub async fn enable(
     println!();
 
     println!("[1/6] Opening local database at {} ...", local_path.display());
-    let local_db = Builder::new_local(&local_path)
+    let local_db = Builder::new_local(local_path.to_str().context("local path is not valid UTF-8")?)
         .build()
         .await
         .context("Failed to open local DB")?;
     let local = local_db.connect().context("Failed to connect to local DB")?;
 
     println!("[2/6] Flushing WAL to ensure all data is captured ...");
-    local.execute("PRAGMA wal_checkpoint(TRUNCATE)", libsql::params![]).await
+    local.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await
         .context("Failed to checkpoint WAL")?;
 
     println!("[3/6] Connecting to remote at {} ...", url);
+    // Limbo 0.6.0 does not yet support direct remote client mode.
+    // We use a temporary file replica as a workaround.
+    let tmp_dir = std::env::temp_dir().join("tyto-remote-migrate");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let path = tmp_dir.join("remote.db");
+    let path_str = path.to_str().context("temp path is not valid UTF-8")?;
+    
     let remote_db = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        Builder::new_remote(url.clone(), token).build(),
+        turso::sync::Builder::new_remote(path_str)
+            .with_remote_url(url.clone())
+            .with_auth_token(token.clone())
+            .build(),
     )
     .await
     .map_err(|_| anyhow::anyhow!(
         "Timed out connecting to remote at {url} (10s). Check the URL and token."
     ))
     .and_then(|r| r.context("Failed to connect to remote - check the URL and token"))?;
-    let remote = remote_db.connect().context("Failed to connect to remote DB")?;
+    let remote = remote_db.connect().await.context("Failed to connect to remote DB")?;
 
     println!("[4/6] Running migrations on remote database ...");
     crate::migrations::run(&remote).await?;
@@ -110,16 +120,24 @@ pub async fn sync(config: &Config, force: bool) -> Result<String> {
     }
 
     println!("Connecting to remote at {} ...", url);
+    let tmp_dir = std::env::temp_dir().join("tyto-remote-sync");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let path = tmp_dir.join("remote.db");
+    let path_str = path.to_str().context("temp path is not valid UTF-8")?;
+
     let remote_db = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        Builder::new_remote(url.to_string(), token.to_string()).build(),
+        turso::sync::Builder::new_remote(path_str)
+            .with_remote_url(url.to_string())
+            .with_auth_token(token.to_string())
+            .build(),
     )
     .await
     .map_err(|_| anyhow::anyhow!(
         "Timed out connecting to remote at {url} (10s). Check the URL and token."
     ))
     .and_then(|r| r.context("Failed to connect to remote DB"))?;
-    let remote = remote_db.connect()?;
+    let remote = remote_db.connect().await?;
 
     println!("Running migrations on remote database ...");
     crate::migrations::run(&remote).await?;
@@ -132,7 +150,7 @@ pub async fn sync(config: &Config, force: bool) -> Result<String> {
     }
 
     println!("Opening local database at {} ...", local_path.display());
-    let local_db = Builder::new_local(&local_path)
+    let local_db = Builder::new_local(local_path.to_str().context("local path is not valid UTF-8")?)
         .build()
         .await
         .context("Failed to open local DB")?;
@@ -166,9 +184,10 @@ async fn copy_all_verbose(
 
 async fn row_count(conn: &Connection, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
-    let count = conn
-        .query(&sql, libsql::params![])
-        .await?
+    let mut rows: turso::Rows = conn
+        .query(&sql, ())
+        .await?;
+    let count = rows
         .next()
         .await?
         .map(|r| r.get::<i64>(0).unwrap_or(0))
@@ -177,13 +196,13 @@ async fn row_count(conn: &Connection, table: &str) -> Result<i64> {
 }
 
 async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> Result<usize> {
-    let mut rows = local
+    let mut rows: turso::Rows = local
         .query(
             "SELECT id, project_id, topic_key, type, title, content, facts, tags,
                     importance, access_count, last_accessed, pinned, status,
                     session_id, source, created_at, updated_at, content_hash
              FROM memories",
-            libsql::params![],
+            (),
         )
         .await?;
 
@@ -196,30 +215,30 @@ async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> R
                      importance, access_count, last_accessed, pinned, status,
                      session_id, source, created_at, updated_at, content_hash)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
-                libsql::params![
-                    row.get_value(0)?,
-                    row.get_value(1)?,
-                    row.get_value(2)?,
-                    row.get_value(3)?,
-                    row.get_value(4)?,
-                    row.get_value(5)?,
-                    row.get_value(6)?,
-                    row.get_value(7)?,
-                    row.get_value(8)?,
-                    row.get_value(9)?,
-                    row.get_value(10)?,
-                    row.get_value(11)?,
-                    row.get_value(12)?,
-                    row.get_value(13)?,
-                    row.get_value(14)?,
-                    row.get_value(15)?,
-                    row.get_value(16)?,
-                    row.get_value(17)?
-                ],
+                params_from_iter(vec![
+                    Value::Text(row.get::<String>(0)?),
+                    Value::Text(row.get::<String>(1)?),
+                    Value::from(row.get::<Option<String>>(2)?),
+                    Value::Text(row.get::<String>(3)?),
+                    Value::Text(row.get::<String>(4)?),
+                    Value::Text(row.get::<String>(5)?),
+                    Value::from(row.get::<Option<String>>(6)?),
+                    Value::from(row.get::<Option<String>>(7)?),
+                    Value::Real(row.get::<f64>(8)?),
+                    Value::Integer(row.get::<i64>(9)?),
+                    Value::from(row.get::<Option<String>>(10)?),
+                    Value::Integer(row.get::<i64>(11)?),
+                    Value::Text(row.get::<String>(12)?),
+                    Value::Text(row.get::<String>(13)?),
+                    Value::Text(row.get::<String>(14)?),
+                    Value::Text(row.get::<String>(15)?),
+                    Value::Text(row.get::<String>(16)?),
+                    Value::Text(row.get::<String>(17)?),
+                ]),
             )
             .await?;
         count += 1;
-        if total > 0 && count.is_multiple_of(10) {
+        if total > 0 && count % 10 == 0 {
             println!("      {count}/{total} memories ...");
         }
     }
@@ -227,10 +246,10 @@ async fn copy_memories(local: &Connection, remote: &Connection, total: i64) -> R
 }
 
 async fn copy_vectors(local: &Connection, remote: &Connection) -> Result<usize> {
-    let mut rows = local
+    let mut rows: turso::Rows = local
         .query(
             "SELECT memory_id, embed_model, embedding FROM memory_vectors",
-            libsql::params![],
+            (),
         )
         .await?;
 
@@ -238,8 +257,8 @@ async fn copy_vectors(local: &Connection, remote: &Connection) -> Result<usize> 
     while let Some(row) = rows.next().await? {
         remote
             .execute(
-                "INSERT OR IGNORE INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
-                libsql::params![row.get_value(0)?, row.get_value(1)?, row.get_value(2)?],
+                "INSERT OR REPLACE INTO memory_vectors (memory_id, embed_model, embedding) VALUES (?1, ?2, ?3)",
+                (row.get::<String>(0)?, row.get::<String>(1)?, row.get::<Vec<u8>>(2)?),
             )
             .await?;
         count += 1;
@@ -248,11 +267,11 @@ async fn copy_vectors(local: &Connection, remote: &Connection) -> Result<usize> 
 }
 
 async fn copy_captures(local: &Connection, remote: &Connection) -> Result<usize> {
-    let mut rows = local
+    let mut rows: turso::Rows = local
         .query(
             "SELECT id, project_id, captured_at, tool_name, summary, raw_data, presented_at
              FROM raw_captures",
-            libsql::params![],
+            (),
         )
         .await?;
 
@@ -263,15 +282,15 @@ async fn copy_captures(local: &Connection, remote: &Connection) -> Result<usize>
                 "INSERT OR IGNORE INTO raw_captures
                     (id, project_id, captured_at, tool_name, summary, raw_data, presented_at)
                  VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                libsql::params![
-                    row.get_value(0)?,
-                    row.get_value(1)?,
-                    row.get_value(2)?,
-                    row.get_value(3)?,
-                    row.get_value(4)?,
-                    row.get_value(5)?,
-                    row.get_value(6)?
-                ],
+                (
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<Option<String>>(6)?,
+                ),
             )
             .await?;
         count += 1;

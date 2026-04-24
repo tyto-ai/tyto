@@ -14,6 +14,8 @@
     cargo-bloat
     cargo-outdated
     gh
+    openssl
+    pkg-config
     python3
     sqld
     sqlite
