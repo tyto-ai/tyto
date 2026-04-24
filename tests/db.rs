@@ -1,4 +1,25 @@
 use turso::Connection;
+use tyto::store::{StoreRequest, new_write_lock};
+
+fn dummy_embedding() -> Vec<f32> {
+    vec![0.1f32; 384]
+}
+
+fn basic_request(content: &str) -> StoreRequest {
+    StoreRequest {
+        content: content.to_string(),
+        memory_type: "decision".to_string(),
+        title: "Test memory".to_string(),
+        tags: vec![],
+        topic_key: None,
+        project_id: "test-project".to_string(),
+        session_id: "test-session".to_string(),
+        importance: Some(0.7),
+        facts: vec![],
+        source: None,
+        pinned: None,
+    }
+}
 
 async fn seed_memory(conn: &Connection, id: &str, project_id: &str) {
     conn.execute(
@@ -164,4 +185,101 @@ async fn list_type_filter() {
 
     let decisions = tyto::retrieve::list(&db.conn, "test-project", Some("decision"), &[], 10, 0.0).await.unwrap();
     assert!(decisions.is_empty());
+}
+
+// --- store + get_full roundtrip ---
+
+#[tokio::test]
+async fn store_and_get_full_roundtrip() {
+    let db = setup().await;
+    let lock = new_write_lock();
+
+    let result = tyto::store::store_memory(
+        &db.conn,
+        dummy_embedding(),
+        &lock,
+        basic_request("This is a test memory about Rust"),
+        30,
+    )
+    .await
+    .unwrap();
+
+    assert!(!result.id.is_empty());
+    assert!(!result.upserted);
+
+    let mem = tyto::retrieve::get_full_batch(&db.conn, &[result.id.clone()], "test-project")
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(mem.content, "This is a test memory about Rust");
+    assert_eq!(mem.memory_type, "decision");
+    assert!((mem.importance - 0.7).abs() < 0.001);
+}
+
+#[tokio::test]
+async fn store_dedup_within_window_returns_same_id() {
+    let db = setup().await;
+    let lock = new_write_lock();
+
+    let r1 = tyto::store::store_memory(&db.conn, dummy_embedding(), &lock, basic_request("Duplicate content"), 30)
+        .await
+        .unwrap();
+    let r2 = tyto::store::store_memory(&db.conn, dummy_embedding(), &lock, basic_request("Duplicate content"), 30)
+        .await
+        .unwrap();
+
+    assert_eq!(r1.id, r2.id, "same content in same session should deduplicate");
+    assert!(!r2.upserted);
+}
+
+#[tokio::test]
+async fn topic_key_upsert_updates_content() {
+    let db = setup().await;
+    let lock = new_write_lock();
+
+    let mut req1 = basic_request("Original content");
+    req1.topic_key = Some("my-topic".to_string());
+    let r1 = tyto::store::store_memory(&db.conn, dummy_embedding(), &lock, req1, 30)
+        .await
+        .unwrap();
+
+    // Different session to bypass dedup window.
+    let mut req2 = basic_request("Updated content");
+    req2.topic_key = Some("my-topic".to_string());
+    req2.session_id = "other-session".to_string();
+    let r2 = tyto::store::store_memory(&db.conn, dummy_embedding(), &lock, req2, 30)
+        .await
+        .unwrap();
+
+    assert_eq!(r1.id, r2.id, "upsert should keep the same ID");
+    assert!(r2.upserted);
+
+    let mem = tyto::retrieve::get_full_batch(&db.conn, &[r1.id.clone()], "test-project")
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(mem.content, "Updated content");
+}
+
+#[tokio::test]
+async fn store_keyword_search_finds_by_word() {
+    let db = setup().await;
+    let lock = new_write_lock();
+
+    let mut req = basic_request("rustaceans love ownership and borrowing");
+    req.title = "Rust ownership".to_string();
+    tyto::store::store_memory(&db.conn, dummy_embedding(), &lock, req, 30)
+        .await
+        .unwrap();
+
+    let results = tyto::retrieve::search_bm25(&db.conn, "ownership", "test-project", 5)
+        .await
+        .unwrap();
+
+    assert!(!results.is_empty(), "keyword search should find the stored memory");
+    assert!(results.iter().any(|r| r.title == "Rust ownership"));
 }
