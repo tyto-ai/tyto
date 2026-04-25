@@ -12,6 +12,7 @@ on:
       - 'src/bin/tyto-bootstrap.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
