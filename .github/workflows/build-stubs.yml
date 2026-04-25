@@ -112,5 +112,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add agents/shared/bin/
-          git diff --cached --quiet || git commit -m "chore: update bootstrap binaries [skip ci]"
+          git diff --cached --quiet || git commit -m "chore: update bootstrap binaries"
           git push
