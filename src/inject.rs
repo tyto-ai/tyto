@@ -154,18 +154,7 @@ async fn run_inner(
     // If the server is starting up (lock held but not ready), we WAIT here rather
     // than falling through to direct DB access, because direct access will hit
     // a locking conflict on the replica file and trigger slow retries/purges.
-    let mut state = serve_state(&config);
-    if matches!(inject_type, "session" | "compact") && matches!(state, ServeState::Loading) {
-        let t_wait = std::time::Instant::now();
-        // Worth a short wait so the agent gets real memory context at session start.
-        while t_wait.elapsed() < std::time::Duration::from_secs(3) {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            state = serve_state(&config);
-            if matches!(state, ServeState::Ready) {
-                break;
-            }
-        }
-    }
+    let state = serve_state(&config);
 
     if matches!(state, ServeState::Ready) {
         let t_ipc = std::time::Instant::now();
