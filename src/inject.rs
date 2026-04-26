@@ -41,7 +41,8 @@ enum ServeState {
 }
 
 /// Detect the current serve state via serve.ready (fast) and serve.lock (slow).
-/// The OS releases serve.lock automatically on any exit, so there are no stale files.
+/// The OS releases the advisory lock on serve.lock automatically on any exit.
+/// serve.lock is deleted on graceful shutdown; if it exists and is unlocked, server is not running.
 fn serve_state(config: &Config) -> ServeState {
     if config.serve_ready_path().exists() {
         return ServeState::Ready;

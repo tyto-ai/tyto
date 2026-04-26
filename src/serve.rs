@@ -1195,8 +1195,11 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     };
 
     // Primary cleans up state files.
+    // serve.lock is deleted here (directory entry only); the OS advisory lock on the
+    // forgotten fd stays held until true process exit, so no handover race is possible.
     if is_primary.load(std::sync::atomic::Ordering::SeqCst) {
         let _ = std::fs::remove_file(&ready_file);
+        let _ = std::fs::remove_file(&lock_file_path);
         #[cfg(unix)]
         let _ = std::fs::remove_file(config.serve_socket_path());
     }
