@@ -22,8 +22,9 @@ pub fn compact(
     let mut out = header;
     for r in results {
         let date = r.created_at.get(..10).unwrap_or(&r.created_at);
+        let stale = if r.is_stale { "[stale?] " } else { "" };
         out.push_str(&format!(
-            "[{:<18} {:.2}] {:.3}  {}  {}  ~{}c  {}\n",
+            "{stale}[{:<18} {:.2}] {:.3}  {}  {}  ~{}c  {}\n",
             r.memory_type, r.importance, r.score, r.id, date, r.content_len, r.title
         ));
     }
@@ -34,8 +35,9 @@ pub fn compact(
 /// Format a single memory as one line (no header/footer), for use in merged ranked output.
 pub fn compact_single(r: &CompactResult) -> String {
     let date = r.created_at.get(..10).unwrap_or(&r.created_at);
+    let stale = if r.is_stale { "[stale?] " } else { "" };
     format!(
-        "[{:<18} {:.2}] {:.3}  {}  {}  ~{}c  {}\n",
+        "{stale}[{:<18} {:.2}] {:.3}  {}  {}  ~{}c  {}\n",
         r.memory_type, r.importance, r.score, r.id, date, r.content_len, r.title
     )
 }
@@ -45,8 +47,9 @@ pub fn summary(results: &[CompactResult]) -> String {
     let mut out = format!("--- Memory Context ({} results) ---\n", results.len());
     for r in results {
         let date = r.created_at.get(..10).unwrap_or(&r.created_at);
+        let stale = if r.is_stale { "[stale?] " } else { "" };
         out.push_str(&format!(
-            "[{:<18} {:.2}] {:.3}  {}  {}  ~{}c  {}\n",
+            "{stale}[{:<18} {:.2}] {:.3}  {}  {}  ~{}c  {}\n",
             r.memory_type, r.importance, r.score, r.id, date, r.content_len, r.title
         ));
         let facts: Vec<String> = r.facts_json.as_deref()
@@ -85,6 +88,8 @@ mod tests {
             content_len: 250,
             facts_json: None,
             tags_json: None,
+            pinned: false,
+            is_stale: false,
         }
     }
 

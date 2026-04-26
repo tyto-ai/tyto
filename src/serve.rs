@@ -611,7 +611,9 @@ impl TytoServer {
         let limit = input.limit.unwrap_or(10);
 
         let embedding = {
+            let t_lock = std::time::Instant::now();
             let mut e = db_ready.embedder.lock().await;
+            tracing::debug!(elapsed_ms = t_lock.elapsed().as_millis(), "search_code embedder lock wait");
             e.embed(&input.query).map_err(|e| format!("embed failed: {e}"))?
         };
 

@@ -1,6 +1,8 @@
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::embed;
 
@@ -17,11 +19,14 @@ pub struct CodeResult {
     pub line_end: i64,
     pub signature: Option<String>,
     pub doc_comment: Option<String>,
+    pub body_preview: Option<String>,
     pub churn_count: i64,
     pub hotspot_score: f64,
     pub language: String,
     pub rrf_score: f64,
     pub related_commits: Vec<String>,
+    /// Number of identical (same body hash) results collapsed into this entry.
+    pub duplicate_count: usize,
 }
 
 /// Hybrid vector + FTS search over indexed code chunks.
@@ -31,6 +36,7 @@ pub async fn search_code(
     query: &str,
     limit: usize,
 ) -> Result<Vec<CodeResult>> {
+    let t_total = Instant::now();
     let blob = embed::floats_to_blob(&embedding);
     let model = embed::model_id();
     let k = limit * 2;
@@ -39,6 +45,7 @@ pub async fn search_code(
     // Same approach as memory search — turso's vector_distance_cos + vector32 work
     // on any local DB opened with experimental_index_method(true).
     // Gracefully degrades to FTS-only if index_vectors is empty or query fails.
+    let t_vec = Instant::now();
     let mut vector_ranks: HashMap<String, usize> = HashMap::new();
     match conn.query(
         "SELECT ic.id, vector_distance_cos(iv.embedding, vector32(?1)) as dist
@@ -62,11 +69,13 @@ pub async fn search_code(
             tracing::warn!(error = %e, "code vector search failed, falling back to FTS-only");
         }
     }
+    tracing::debug!(elapsed_ms = t_vec.elapsed().as_millis(), results = vector_ranks.len(), "code vector search");
 
     // Stream B: native FTS using turso's fts_match() / fts_score() functions.
     // Syntax: WHERE fts_match(col1, col2, ..., query) — NOT the SQLite FTS5
     // "table_name MATCH query" form which turso does not support.
     // Results ordered by fts_score() DESC so RRF rank reflects relevance order.
+    let t_fts = Instant::now();
     let fts_ranks: HashMap<String, usize> = {
         let fts_q = build_fts_query(query);
         if fts_q.is_empty() {
@@ -91,6 +100,7 @@ pub async fn search_code(
             ranks
         }
     };
+    tracing::debug!(elapsed_ms = t_fts.elapsed().as_millis(), results = fts_ranks.len(), "code fts search");
 
     // Merge candidate IDs from both streams
     let mut all_ids: Vec<String> = vector_ranks.keys().cloned().collect();
@@ -105,10 +115,12 @@ pub async fn search_code(
     }
 
     // Fetch metadata and compute two-stream RRF scores
+    let t_meta = Instant::now();
     let placeholders = all_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let sql = format!(
         "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
-                line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
+                line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language,
+                body_preview
          FROM index_chunks WHERE id IN ({placeholders})"
     );
     let mut rows = conn.query(&sql, turso::params_from_iter(all_ids.clone())).await?;
@@ -130,41 +142,79 @@ pub async fn search_code(
             churn_count: row.get(9).unwrap_or(0),
             hotspot_score: row.get(10).unwrap_or(0.0),
             language: row.get(11).unwrap_or_default(),
+            body_preview: row.get(12).ok(),
             rrf_score: rrf_v + rrf_f,
             related_commits: vec![],
+            duplicate_count: 0,
         });
     }
 
     scored.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
 
-    for result in &mut scored {
-        result.related_commits = fetch_related_commits_sync(conn, &result.id, 3).await?;
+    // Deduplicate by normalized body hash; keep highest-scoring entry per hash.
+    // Iterating in score order means the first occurrence is always the best.
+    let mut seen_hashes: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut deduped: Vec<CodeResult> = Vec::new();
+    for r in scored {
+        let hash = body_hash(r.body_preview.as_deref());
+        if let Some(&idx) = seen_hashes.get(&hash) {
+            deduped[idx].duplicate_count += 1;
+        } else {
+            seen_hashes.insert(hash, deduped.len());
+            deduped.push(r);
+        }
     }
+    let mut scored = deduped;
+    scored.truncate(limit);
+    tracing::debug!(elapsed_ms = t_meta.elapsed().as_millis(), candidates = scored.len(), "code metadata fetch");
 
+    let t_commits = Instant::now();
+    let ids: Vec<String> = scored.iter().map(|r| r.id.clone()).collect();
+    let commit_map = fetch_related_commits_batch(conn, &ids, 3).await?;
+    for result in &mut scored {
+        result.related_commits = commit_map.get(&result.id).cloned().unwrap_or_default();
+    }
+    tracing::debug!(elapsed_ms = t_commits.elapsed().as_millis(), "code commit fetch batch");
+
+    tracing::debug!(elapsed_ms = t_total.elapsed().as_millis(), results = scored.len(), "search_code total");
     Ok(scored)
 }
 
-async fn fetch_related_commits_sync(
+async fn fetch_related_commits_batch(
     conn: &Arc<turso::Connection>,
-    chunk_id: &str,
-    limit: usize,
-) -> Result<Vec<String>> {
-    let mut rows = conn.query(
-        "SELECT c.message
+    chunk_ids: &[String],
+    per_chunk_limit: usize,
+) -> Result<HashMap<String, Vec<String>>> {
+    if chunk_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT cc.chunk_id, c.message
          FROM index_commits c
          JOIN index_chunk_commits cc ON cc.commit_sha = c.sha
-         WHERE cc.chunk_id = ?1
-         LIMIT ?2",
-        (chunk_id, limit as i64)
-    ).await?;
-    let mut msgs = Vec::new();
+         WHERE cc.chunk_id IN ({placeholders})
+         ORDER BY cc.chunk_id, c.sha"
+    );
+    let mut rows = conn.query(&sql, turso::params_from_iter(chunk_ids.iter().cloned())).await?;
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
     while let Some(row) = rows.next().await? {
-        if let Ok(msg) = row.get::<String>(0) {
-            msgs.push(msg);
+        let chunk_id: String = row.get(0)?;
+        let message: String = row.get(1)?;
+        let msgs = result.entry(chunk_id).or_default();
+        if msgs.len() < per_chunk_limit {
+            msgs.push(message);
         }
     }
-    Ok(msgs)
+    Ok(result)
+}
+
+fn body_hash(body: Option<&str>) -> [u8; 32] {
+    let normalized = body.unwrap_or("").lines()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Sha256::digest(normalized.as_bytes()).into()
 }
 
 /// Lookup a symbol by name (and optionally file path).
@@ -176,7 +226,8 @@ pub async fn get_symbol(
     let (sql, params): (String, Vec<String>) = if let Some(fp) = file_path {
         (
             "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
-                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
+                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language,
+                    body_preview
              FROM index_chunks
              WHERE (symbol_name = ?1 OR qualified_name = ?1 OR qualified_name LIKE ?2)
                AND file_path = ?3
@@ -187,7 +238,8 @@ pub async fn get_symbol(
     } else {
         (
             "SELECT id, symbol_name, qualified_name, symbol_kind, file_path,
-                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language
+                    line_start, line_end, signature, doc_comment, churn_count, hotspot_score, language,
+                    body_preview
              FROM index_chunks
              WHERE symbol_name = ?1 OR qualified_name = ?1 OR qualified_name LIKE ?2
              ORDER BY hotspot_score DESC, churn_count DESC, line_start
@@ -212,13 +264,17 @@ pub async fn get_symbol(
             churn_count: row.get(9).unwrap_or(0),
             hotspot_score: row.get(10).unwrap_or(0.0),
             language: row.get(11).unwrap_or_default(),
+            body_preview: row.get(12).ok(),
             rrf_score: 0.0,
             related_commits: vec![],
+            duplicate_count: 0,
         });
     }
 
+    let ids: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
+    let commit_map = fetch_related_commits_batch(conn, &ids, 5).await?;
     for r in &mut results {
-        r.related_commits = fetch_related_commits_sync(conn, &r.id, 5).await?;
+        r.related_commits = commit_map.get(&r.id).cloned().unwrap_or_default();
     }
     Ok(results)
 }
@@ -234,9 +290,14 @@ pub async fn index_stats(conn: &Arc<turso::Connection>) -> Result<(i64, i64)> {
 
 /// Format a CodeResult for display to the agent.
 pub fn format_result(r: &CodeResult, verbose: bool) -> String {
+    let dup_suffix = if r.duplicate_count > 0 {
+        format!("  (+{} duplicates)", r.duplicate_count)
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "[{}] {:.3}  {}:{}-{} {}\n",
-        r.symbol_kind, r.rrf_score, r.file_path, r.line_start, r.line_end, r.qualified_name
+        "[{}] {:.3}  {}:{}-{}{} {}\n",
+        r.symbol_kind, r.rrf_score, r.file_path, r.line_start, r.line_end, dup_suffix, r.qualified_name
     );
     if let Some(ref sig) = r.signature {
         out.push_str(&format!("Signature: {sig}\n"));

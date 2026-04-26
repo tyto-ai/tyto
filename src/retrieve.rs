@@ -84,6 +84,8 @@ pub struct CompactResult {
     pub facts_json: Option<String>,
     /// Raw JSON array of tag strings from the DB; None if the column is NULL.
     pub tags_json: Option<String>,
+    pub pinned: bool,
+    pub is_stale: bool,
 }
 
 #[derive(Debug)]
@@ -197,7 +199,7 @@ pub async fn search(
     let placeholders = all_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let meta_sql = format!(
         "SELECT id, type, title, created_at, importance, access_count, last_accessed, source,
-                length(content), facts, tags
+                length(content), facts, tags, pinned
          FROM memories WHERE id IN ({placeholders}) AND status = 'active'"
     );
     let mut rows = conn
@@ -217,9 +219,11 @@ pub async fn search(
         let content_len: i64 = row.get(8).unwrap_or(0);
         let facts_json: Option<String> = row.get(9).ok();
         let tags_json: Option<String> = row.get(10).ok();
+        let pinned: bool = row.get::<i64>(11).unwrap_or(0) != 0;
 
         let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
         let ret = retention_score(&memory_type, importance, days, access_count, &source);
+        let is_stale = !pinned && ret < STALE_RETENTION_THRESHOLD && days >= STALE_MIN_AGE_DAYS;
 
         let rrf_v = vector_ranks
             .get(&id)
@@ -237,7 +241,7 @@ pub async fn search(
         const SALIENCE_ALPHA: f64 = 0.3;
         let score = (rrf_v + rrf_kw) * boost * (1.0 + SALIENCE_ALPHA * ret);
 
-        scored.push(CompactResult { id, memory_type, title, created_at, importance, score, content_len: content_len as usize, facts_json, tags_json });
+        scored.push(CompactResult { id, memory_type, title, created_at, importance, score, content_len: content_len as usize, facts_json, tags_json, pinned, is_stale });
     }
     tracing::debug!(elapsed_ms = t.elapsed().as_millis(), candidates = scored.len(), "metadata fetch");
 
@@ -384,7 +388,7 @@ pub async fn list(
     };
     let sql = format!(
         "SELECT id, type, title, created_at, importance, access_count, last_accessed, source, tags,
-                length(content), facts
+                length(content), facts, pinned
          FROM memories
          WHERE project_id = ?1 AND status = 'active' AND importance >= ?2
          {type_clause}
@@ -417,18 +421,23 @@ pub async fn list(
         let tags_json: Option<String> = row.get(8).ok();
         let content_len: i64 = row.get(9).unwrap_or(0);
         let facts_json: Option<String> = row.get(10).ok();
+        let pinned: bool = row.get::<i64>(11).unwrap_or(0) != 0;
         let days = days_since(last_accessed.as_deref().unwrap_or(&created_at), &now);
+        let ret = retention_score(&memory_type, importance, days, access_count, &source);
+        let is_stale = !pinned && ret < STALE_RETENTION_THRESHOLD && days >= STALE_MIN_AGE_DAYS;
 
         candidates.push(CompactResult {
             id: row.get(0)?,
             title: row.get(2)?,
             created_at,
-            score: retention_score(&memory_type, importance, days, access_count, &source),
+            score: ret,
             importance,
             memory_type,
             content_len: content_len as usize,
             facts_json,
             tags_json,
+            pinned,
+            is_stale,
         });
     }
 

@@ -13,7 +13,7 @@ use super::parser::{self, Chunk, Lang};
 /// Directories and patterns always skipped regardless of .gitignore.
 const ALWAYS_EXCLUDE: &[&str] = &[
     ".git", "target", "node_modules", "dist", "build",
-    "__pycache__", ".venv", "vendor", ".mypy_cache",
+    "__pycache__", ".venv", "vendor", ".mypy_cache", ".devenv",
 ];
 
 pub(crate) fn is_excluded(path: &Path) -> bool {
@@ -337,6 +337,12 @@ mod tests {
         assert!(is_excluded(Path::new("go.sum")));
         assert!(is_excluded(Path::new("package-lock.json")));
         assert!(is_excluded(Path::new("yarn.lock")));
+    }
+
+    #[test]
+    fn excluded_devenv_dir() {
+        assert!(is_excluded(Path::new(".devenv/shell-abc.sh")));
+        assert!(is_excluded(Path::new(".devenv/state/go/pkg/foo.go")));
     }
 
     #[test]
