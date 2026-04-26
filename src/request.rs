@@ -21,15 +21,34 @@ pub async fn run(config: &Config, tool: &str, args: Option<&str>) -> Result<()> 
 }
 
 /// Call the `search` tool on the running serve instance.
-/// Returns None if serve is not reachable (no socket / connect failure).
-pub async fn call_search(config: &Config, query: &str, limit: usize) -> Option<String> {
+/// Returns None if serve is not reachable, the call fails, or the timeout elapses.
+pub async fn call_search(config: &Config, query: &str, limit: usize, timeout_ms: u64) -> Option<String> {
     let args = serde_json::json!({"query": query, "limit": limit}).to_string();
-    call_tool_on_server(config, "search", Some(&args)).await.ok().flatten()
+    let fut = call_tool_on_server(config, "search", Some(&args));
+    with_timeout(fut, timeout_ms).await
 }
 
 /// Call the `session_context` tool on the running serve instance.
-pub async fn call_session_context(config: &Config) -> Option<String> {
-    call_tool_on_server(config, "session_context", None).await.ok().flatten()
+/// Returns None if serve is not reachable, the call fails, or the timeout elapses.
+pub async fn call_session_context(config: &Config, timeout_ms: u64) -> Option<String> {
+    let fut = call_tool_on_server(config, "session_context", None);
+    with_timeout(fut, timeout_ms).await
+}
+
+async fn with_timeout(
+    fut: impl std::future::Future<Output = anyhow::Result<Option<String>>>,
+    timeout_ms: u64,
+) -> Option<String> {
+    if timeout_ms == 0 {
+        return fut.await.ok().flatten();
+    }
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+        Ok(result) => result.ok().flatten(),
+        Err(_) => {
+            tracing::debug!(timeout_ms, "socket call timed out");
+            None
+        }
+    }
 }
 
 /// Connect to the running serve instance, call one tool, and return the text output.

@@ -24,6 +24,10 @@ impl Embedder {
             .join("tyto")
             .join("models");
 
+        if !cache_dir.exists() {
+            eprintln!("[tyto] Downloading embedding model (~22MB) on first run. This may take a minute...");
+        }
+
         // TYTO_FORCE_MODEL_REFRESH=1: delete the model cache before loading so
         // fastembed re-downloads a fresh copy. Useful for troubleshooting a
         // corrupted model or testing the cold-start download path locally.

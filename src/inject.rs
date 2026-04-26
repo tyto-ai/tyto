@@ -79,13 +79,14 @@ pub async fn run(
     query_override: Option<String>,
     limit: usize,
     budget: usize,
+    socket_timeout_ms: u64,
 ) -> Result<()> {
     // Stop inject needs no DB - read stop_hook_active from stdin then emit instructions.
     if inject_type == "stop" {
         return run_stop(budget);
     }
 
-    if let Err(e) = run_inner(inject_type, query_override, limit, budget).await {
+    if let Err(e) = run_inner(inject_type, query_override, limit, budget, socket_timeout_ms).await {
         println!(
             "[tyto] CRITICAL: Memory system unavailable - memories were NOT loaded for this \
              session and storing new memories will fail. Inform the user of this immediately \
@@ -100,6 +101,7 @@ async fn run_inner(
     query_override: Option<String>,
     limit: usize,
     budget: usize,
+    socket_timeout_ms: u64,
 ) -> Result<()> {
     let t_total = std::time::Instant::now();
     let cwd = env::current_dir()?;
@@ -162,9 +164,9 @@ async fn run_inner(
         // For session/compact hooks, we request context injection.
         // For prompt hooks, we only call if we have a query.
         let result = if inject_type == "session" || inject_type == "compact" {
-            request::call_session_context(&config).await
+            request::call_session_context(&config, socket_timeout_ms).await
         } else if !prompt_query.is_empty() {
-            request::call_search(&config, &prompt_query, limit).await
+            request::call_search(&config, &prompt_query, limit, socket_timeout_ms).await
         } else {
             None
         };
@@ -205,7 +207,10 @@ async fn run_inner(
         ServeState::NotRunning => {
             if inject_type == "session" || inject_type == "compact" {
                 println!(
-                    "[tyto] tyto serve is not running. Please start tyto serve or restart your tyto plugin."
+                    "[tyto] tyto serve is not running — memory and code context are unavailable \
+                     for this session.\n\
+                     Inform the user of this before doing anything else. \
+                     Ask them to run: tyto serve"
                 );
             }
         }

@@ -27,6 +27,8 @@ enum Command {
         limit: usize,
         #[arg(long, default_value_t = 9500, help = "Max output bytes")]
         budget: usize,
+        #[arg(long, default_value_t = 400, help = "Socket call timeout in milliseconds (0 = no timeout)")]
+        socket_timeout: u64,
     },
     /// Manage remote database sync
     Remote {
@@ -83,9 +85,9 @@ async fn main() -> Result<()> {
             let config = Config::load(start)?;
             serve::run(config).await?;
         }
-        Command::Inject { r#type, query, limit, budget } => {
+        Command::Inject { r#type, query, limit, budget, socket_timeout } => {
             tyto::log::init_tracing();
-            if let Err(e) = inject::run(&r#type, query, limit, budget).await {
+            if let Err(e) = inject::run(&r#type, query, limit, budget, socket_timeout).await {
                 eprintln!("tyto inject error: {e}");
             }
         }

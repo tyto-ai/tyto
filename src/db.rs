@@ -72,13 +72,12 @@ impl Db {
             AnyDb::Synced(db) => db.connect().await.context("Failed to connect to synced database")?,
         };
 
-        if matches!(s.mode, StorageMode::Managed | StorageMode::Local) {
-            // turso 0.6.0 uses experimental_multiprocess_wal(true) which enables WAL internally.
-            // busy_timeout is also important.
-            conn.execute_batch("PRAGMA busy_timeout=5000;")
-                .await
-                .context("Failed to set busy_timeout")?;
-        }
+        // Apply busy_timeout to all modes. Replica mode also needs it: the libsql background
+        // sync thread can briefly lock the WAL, and without a retry budget store_memories
+        // fails with "database is locked" on the first contention window.
+        conn.execute_batch("PRAGMA busy_timeout=5000;")
+            .await
+            .context("Failed to set busy_timeout")?;
 
         tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "Db::open");
         Ok(Self { conn, handle: any_db, temp_dir })
