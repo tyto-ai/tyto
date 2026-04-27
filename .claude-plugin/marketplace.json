@@ -10,10 +10,7 @@
   "plugins": [
     {
       "name": "coree",
-      "source": {
-        "source": "npm",
-        "package": "@coree-ai/coree"
-      },
+      "source": "./agents/claude",
       "description": "Persistent memory and code intelligence for AI agents - stores decisions, discoveries, and gotchas across sessions using local vector + BM25 search.",
       "homepage": "https://github.com/coree-ai/coree",
       "license": "Apache-2.0",

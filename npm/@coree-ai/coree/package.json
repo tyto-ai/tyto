@@ -13,9 +13,6 @@
   },
   "files": [
     "bin/coree",
-    ".claude-plugin/plugin.json",
-    ".mcp.json",
-    "hooks/hooks.json",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES"

@@ -4,10 +4,8 @@
   "description": "Persistent memory and code intelligence for AI agents",
   "mcpServers": {
     "coree": {
-      "command": "${extensionPath}/../shared/scripts/coree.cmd",
-      "args": [
-        "serve"
-      ],
+      "command": "npx",
+      "args": ["--yes", "@coree-ai/coree@0.9.9", "serve"],
       "env": {
         "COREE_PLUGIN_DATA": "${extensionPath}/data"
       },

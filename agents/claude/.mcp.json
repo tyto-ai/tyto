@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "coree": {
+      "command": "npx",
+      "args": ["--yes", "@coree-ai/coree@0.9.9", "serve"]
+    }
+  }
+}
