@@ -1,6 +1,6 @@
 {
   "name": "@coree-ai/coree",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Persistent memory and code intelligence for AI agents",
   "license": "Apache-2.0",
   "repository": {
@@ -28,10 +28,10 @@
     "@coree-ai/coree-model-bge-small-en-v1.5": "1.0.0"
   },
   "optionalDependencies": {
-    "@coree-ai/coree-linux-x64": "0.9.0",
-    "@coree-ai/coree-linux-arm64": "0.9.0",
-    "@coree-ai/coree-darwin-arm64": "0.9.0",
-    "@coree-ai/coree-win32-x64": "0.9.0"
+    "@coree-ai/coree-linux-x64": "0.9.1",
+    "@coree-ai/coree-linux-arm64": "0.9.1",
+    "@coree-ai/coree-darwin-arm64": "0.9.1",
+    "@coree-ai/coree-win32-x64": "0.9.1"
   },
   "publishConfig": {
     "access": "public",

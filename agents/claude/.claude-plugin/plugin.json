@@ -1,6 +1,6 @@
 {
   "name": "coree",
-  "version": "0.8.0-1",
+  "version": "0.9.1-1",
   "description": "Persistent memory and code intelligence for AI agents - stores decisions, discoveries, and gotchas across sessions using local libSQL with vector + BM25 search.",
   "author": {
     "name": "Michael Alexander",
@@ -8,5 +8,10 @@
   },
   "repository": "https://github.com/coree-ai/coree",
   "license": "Apache-2.0",
-  "keywords": ["memory", "persistence", "mcp", "agent"]
+  "keywords": [
+    "memory",
+    "persistence",
+    "mcp",
+    "agent"
+  ]
 }
