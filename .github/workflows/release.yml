@@ -104,12 +104,8 @@ print('Model cached in dist/model')
       - name: Publish platform packages
         run: |
           for pkg in npm/@coree-ai/coree-*; do
-            npm publish "$pkg" --access public
+            npm publish "$pkg" --access public --provenance
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
-        run: npm publish npm/@coree-ai/coree --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish npm/@coree-ai/coree --access public --provenance

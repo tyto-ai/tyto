@@ -66,8 +66,11 @@ copies model into main package `model/`.
 
 ## `release.yml` additions - `publish-npm` job
 
-Added to `.github/workflows/release.yml`. Needs `NPM_TOKEN` secret and `npm-publish`
-environment configured in GitHub Actions. Also needs `@coree-ai` npm org created.
+Added to `.github/workflows/release.yml`. Uses npm trusted publishing (OIDC) -
+no `NPM_TOKEN` secret needed. The `id-token: write` permission allows GitHub Actions
+to mint an OIDC token that npm exchanges for a publish token automatically.
+Requires trusted publisher configured on npmjs.com for each package (link to
+`coree-ai/coree` repo, `release.yml` workflow, `npm-publish` environment).
 
 ## Rust changes made
 
@@ -168,5 +171,5 @@ In CI, `python3 -c "from huggingface_hub import snapshot_download; snapshot_down
 - [x] Extend `release.yml` with `publish-npm` job
 - [x] Update `.claude-plugin/marketplace.json` to npm source
 - [x] Resolve model fetch in CI (huggingface_hub snapshot_download with cache_dir)
-- [ ] Ensure `@coree-ai` npm org exists and `NPM_TOKEN` secret configured in GitHub Actions
+- [ ] Configure trusted publisher on npmjs.com for all 5 packages (link to coree-ai/coree, release.yml, npm-publish env)
 - [ ] End-to-end verify: fresh install via `/plugin install`, confirm no lazy downloads
