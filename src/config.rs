@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use figment::{
     Figment,
     providers::{Env, Format, Toml},
@@ -162,7 +162,10 @@ impl Config {
         let mut cfg: Config = fig.extract().context("Failed to load configuration")?;
         cfg.source_path = project_config;
         if cfg.project_root.is_none() {
-            cfg.project_root = Some(find_project_root(effective_start, cfg.source_path.as_deref()));
+            cfg.project_root = Some(find_project_root(
+                effective_start,
+                cfg.source_path.as_deref(),
+            ));
         } else {
             validate_project_root(cfg.project_root.as_deref().unwrap())?;
         }
