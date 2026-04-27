@@ -37,8 +37,14 @@ fs.writeFileSync(path.join(MAIN_PKG, 'package.json'), JSON.stringify(mainManifes
 
 // Copy model into the model package (model fetched by CI before this script runs).
 // fetch-model.py resolves all symlinks, so a plain recursive copy suffices.
+// dist/model is absent when the model version is already published and the fetch
+// step was skipped - in that case the model package contents are not needed.
 const MODEL_PKG = path.join(NPM_ROOT, 'coree-model-bge-small-en-v1.5');
 const modelSrc = path.join(REPO_ROOT, 'dist', 'model');
 const modelDst = path.join(MODEL_PKG, 'model');
-fs.cpSync(modelSrc, modelDst, { recursive: true });
-console.log('Bundled model into model package.');
+if (fs.existsSync(modelSrc)) {
+  fs.cpSync(modelSrc, modelDst, { recursive: true });
+  console.log('Bundled model into model package.');
+} else {
+  console.log('Skipping model copy (dist/model absent - version already published).');
+}
