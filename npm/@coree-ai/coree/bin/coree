@@ -32,7 +32,10 @@ function selectBin() {
 const bin = selectBin();
 
 // Point the binary at the bundled model so fastembed skips the download.
-const modelDir = path.join(__dirname, '..', 'model');
+const modelDir = path.join(
+  path.dirname(require.resolve('@coree-ai/coree-model-bge-small-en-v1.5/package.json')),
+  'model',
+);
 const childEnv = { ...env, COREE_MODEL_DIR: modelDir };
 
 // Codex: preserve project root from PWD (Node.js does not reset PWD like shells do).

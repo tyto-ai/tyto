@@ -8,9 +8,15 @@
     "url": "git+https://github.com/coree-ai/coree.git",
     "directory": "npm/@coree-ai/coree-darwin-arm64"
   },
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "engines": { "node": ">=18" },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "preferUnplugged": true,
   "publishConfig": {
     "access": "public",

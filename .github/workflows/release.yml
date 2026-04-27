@@ -99,14 +99,17 @@ jobs:
       - name: Fetch embedding model
         run: |
           pip install huggingface_hub --quiet
-          python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Xenova/bge-small-en-v1.5', cache_dir='dist/model'); print('Model cached in dist/model')"
+          python3 scripts/fetch-model.py dist/model
 
       - name: Generate npm packages
         run: node scripts/generate-npm-packages.mjs
 
+      - name: Publish model package
+        run: npm publish npm/@coree-ai/coree-model-bge-small-en-v1.5 --access public --provenance
+
       - name: Publish platform packages
         run: |
-          for pkg in npm/@coree-ai/coree-*; do
+          for pkg in npm/@coree-ai/coree-linux-x64 npm/@coree-ai/coree-linux-arm64 npm/@coree-ai/coree-darwin-arm64 npm/@coree-ai/coree-win32-x64; do
             npm publish "$pkg" --access public --provenance
           done
 

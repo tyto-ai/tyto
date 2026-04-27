@@ -1,0 +1,19 @@
+{
+  "name": "@coree-ai/coree-model-bge-small-en-v1.5",
+  "version": "1.0.0",
+  "description": "Bundled BGE Small EN v1.5 embedding model for @coree-ai/coree",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coree-ai/coree.git",
+    "directory": "npm/@coree-ai/coree-model-bge-small-en-v1.5"
+  },
+  "files": [
+    "model/"
+  ],
+  "preferUnplugged": true,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

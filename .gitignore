@@ -1,4 +1,6 @@
 /target
+/dist/
+/npm/@coree-ai/coree-model-bge-small-en-v1.5/model/models--*
 
 # Claude Code local-only state
 .claude/

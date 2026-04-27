@@ -3,14 +3,14 @@ use fastembed::{EmbeddingModel, InitOptions, ModelTrait, TextEmbedding};
 
 pub const DIMS: usize = 384;
 
-/// The HuggingFace model code for the active embedding model (e.g. "BAAI/bge-small-en-v1.5").
-/// Derived from fastembed's default at runtime so it automatically reflects any model change.
+const MODEL: EmbeddingModel = EmbeddingModel::BGESmallENV15;
+
+/// The HuggingFace model code for the active embedding model.
 /// If DIMS is updated, write a schema migration to resize F32_BLOB accordingly.
 pub fn model_id() -> String {
-    let m = EmbeddingModel::default();
-    EmbeddingModel::get_model_info(&m)
+    EmbeddingModel::get_model_info(&MODEL)
         .map(|info| info.model_code.clone())
-        .unwrap_or_else(|| m.to_string())
+        .unwrap_or_else(|| MODEL.to_string())
 }
 
 pub struct Embedder {
@@ -27,9 +27,7 @@ impl Embedder {
                 .join("coree")
                 .join("models");
             if !dir.exists() {
-                eprintln!(
-                    "[coree] Downloading embedding model (~22MB) on first run. This may take a minute..."
-                );
+                eprintln!("[coree] Downloading embedding model on first run. This may take a moment...");
             }
             dir
         };
@@ -43,7 +41,7 @@ impl Embedder {
         }
 
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::default())
+            InitOptions::new(MODEL)
                 .with_cache_dir(cache_dir)
                 .with_show_download_progress(true),
         )

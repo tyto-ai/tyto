@@ -35,10 +35,10 @@ for (const key of Object.keys(mainManifest.optionalDependencies)) {
 }
 fs.writeFileSync(path.join(MAIN_PKG, 'package.json'), JSON.stringify(mainManifest, null, 2) + '\n');
 
-// Copy model into main package (model fetched by CI before this script runs).
-// verbatimSymlinks: true preserves the HuggingFace hub symlink structure
-// (snapshots/ symlinks -> blobs/) rather than resolving them to copies.
+// Copy model into the model package (model fetched by CI before this script runs).
+// fetch-model.py resolves all symlinks, so a plain recursive copy suffices.
+const MODEL_PKG = path.join(NPM_ROOT, 'coree-model-bge-small-en-v1.5');
 const modelSrc = path.join(REPO_ROOT, 'dist', 'model');
-const modelDst = path.join(MAIN_PKG, 'model');
-fs.cpSync(modelSrc, modelDst, { recursive: true, verbatimSymlinks: true });
-console.log('Bundled model into main package.');
+const modelDst = path.join(MODEL_PKG, 'model');
+fs.cpSync(modelSrc, modelDst, { recursive: true });
+console.log('Bundled model into model package.');
