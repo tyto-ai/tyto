@@ -1,6 +1,6 @@
 {
   "name": "@coree-ai/coree-win32-x64",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Windows x64 binary for coree",
   "license": "Apache-2.0",
   "repository": {
