@@ -94,3 +94,55 @@ jobs:
         run: gh release upload dev dev-version.txt --clobber --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Dry-run of the full npm publish pipeline on every main push.
+  # Uses npm pack instead of npm publish so no npm auth is needed.
+  # Uploads .tgz files to the dev GitHub release for manual install testing.
+  pack-npm-dev:
+    name: Pack npm packages (dev)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set dev version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          DEV_VERSION="${VERSION}-dev.${{ github.run_number }}"
+          echo "DEV_VERSION=${DEV_VERSION}" >> $GITHUB_ENV
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('npm/@coree-ai/coree/package.json','utf8')); p.version='${DEV_VERSION}'; fs.writeFileSync('npm/@coree-ai/coree/package.json', JSON.stringify(p,null,2)+'\n');"
+
+      - name: Download build artifacts from dev release
+        run: gh release download dev --repo ${{ github.repository }} --dir dist/ --pattern 'coree-*'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract artifacts
+        run: |
+          cd dist
+          for f in *.tar.gz; do tar xzf "$f"; done
+          for f in *.zip; do unzip -o "$f"; done
+
+      - name: Fetch embedding model
+        run: |
+          pip install huggingface_hub --quiet
+          python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Xenova/bge-small-en-v1.5', cache_dir='dist/model'); print('Model cached')"
+
+      - name: Generate npm packages
+        run: node scripts/generate-npm-packages.mjs
+
+      - name: Pack npm packages
+        run: |
+          for pkg in npm/@coree-ai/coree-*; do npm pack "$pkg" --pack-destination dist/; done
+          npm pack npm/@coree-ai/coree --pack-destination dist/
+
+      - name: Upload npm packs to dev release
+        run: gh release upload dev dist/coree-ai-*.tgz --clobber --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
