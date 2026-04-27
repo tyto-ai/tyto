@@ -2,6 +2,7 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const { spawnSync } = require('child_process');
 const { platform, arch, env } = process;
 
@@ -11,6 +12,24 @@ const PLATFORMS = {
   'darwin-arm64': '@coree-ai/coree-darwin-arm64/coree',
   'win32-x64':    '@coree-ai/coree-win32-x64/coree.exe',
 };
+
+// Claude Code installs plugin deps into a separate npm-cache dir rather than a node_modules
+// sibling of the plugin cache, so require.resolve fails with standard paths. When
+// CLAUDE_PLUGIN_ROOT is set we walk up from it to find the npm-cache and add it to the
+// search path so resolution works in both npx and Claude Code plugin contexts.
+function getClaudeNpmCacheDir() {
+  if (!env.CLAUDE_PLUGIN_ROOT) return null;
+  let dir = env.CLAUDE_PLUGIN_ROOT;
+  while (true) {
+    const candidate = path.join(dir, 'npm-cache');
+    if (fs.existsSync(path.join(candidate, 'node_modules'))) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+const claudeNpmCache = getClaudeNpmCacheDir();
 
 function selectBin() {
   if (env.COREE_BINARY_OVERRIDE) {
@@ -23,8 +42,10 @@ function selectBin() {
     process.stderr.write(`coree: unsupported platform: ${platform} ${arch}\n`);
     process.exit(1);
   }
+  const searchPaths = [path.join(__dirname, '..')];
+  if (claudeNpmCache) searchPaths.push(claudeNpmCache);
   try {
-    return require.resolve(pkg);
+    return require.resolve(pkg, { paths: searchPaths });
   } catch {
     process.stderr.write(`coree: platform binary not installed: ${pkg}\n`);
     process.stderr.write('Try reinstalling @coree-ai/coree.\n');
@@ -32,14 +53,23 @@ function selectBin() {
   }
 }
 
-const bin = selectBin();
+function findModelDir() {
+  const modelPkg = '@coree-ai/coree-model-bge-small-en-v1.5/package.json';
+  const searchPaths = [path.join(__dirname, '..')];
+  if (claudeNpmCache) searchPaths.push(claudeNpmCache);
+  for (const p of searchPaths) {
+    try {
+      return path.join(path.dirname(require.resolve(modelPkg, { paths: [p] })), 'model');
+    } catch {}
+  }
+  return null;
+}
 
-// Point the binary at the bundled model so fastembed skips the download.
-const modelDir = path.join(
-  path.dirname(require.resolve('@coree-ai/coree-model-bge-small-en-v1.5/package.json')),
-  'model',
-);
-const childEnv = { ...env, COREE_MODEL_DIR: modelDir };
+const bin = selectBin();
+const childEnv = { ...env };
+
+const modelDir = findModelDir();
+if (modelDir) childEnv.COREE_MODEL_DIR = modelDir;
 
 // Codex: preserve project root from PWD (Node.js does not reset PWD like shells do).
 if (!childEnv.COREE__PROJECT_ROOT && childEnv.PWD && childEnv.PWD !== process.cwd()) {

@@ -1,6 +1,6 @@
 {
   "name": "coree",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "Persistent memory and code intelligence for AI agents - stores decisions, discoveries, and gotchas across sessions using local libSQL with vector + BM25 search.",
   "author": {
     "name": "Michael Alexander",

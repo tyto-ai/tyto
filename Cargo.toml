@@ -1,6 +1,6 @@
 [package]
 name = "coree"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2024"
 license = "Apache-2.0"
 description = "Persistent memory and code intelligence for AI agents, backed by libSQL and Turso"
