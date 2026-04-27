@@ -1,6 +1,6 @@
 {
   "name": "@coree-ai/coree-darwin-arm64",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "macOS arm64 binary for coree",
   "license": "Apache-2.0",
   "repository": {

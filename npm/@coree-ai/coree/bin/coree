@@ -13,7 +13,10 @@ const PLATFORMS = {
 };
 
 function selectBin() {
-  if (env.COREE_BINARY_OVERRIDE) return env.COREE_BINARY_OVERRIDE;
+  if (env.COREE_BINARY_OVERRIDE) {
+    process.stderr.write(`coree: using binary override: ${env.COREE_BINARY_OVERRIDE}\n`);
+    return env.COREE_BINARY_OVERRIDE;
+  }
   const key = `${platform}-${arch}`;
   const pkg = PLATFORMS[key];
   if (!pkg) {

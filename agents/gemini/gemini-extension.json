@@ -1,6 +1,6 @@
 {
   "name": "coree",
-  "version": "0.9.4-1",
+  "version": "0.9.5-1",
   "description": "Persistent memory and code intelligence for AI agents",
   "mcpServers": {
     "coree": {
