@@ -1,6 +1,6 @@
 {
   "name": "@coree-ai/coree-linux-x64",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Linux x64 binary for coree",
   "license": "Apache-2.0",
   "repository": {
