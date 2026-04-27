@@ -92,11 +92,7 @@ jobs:
       - name: Fetch embedding model
         run: |
           pip install huggingface_hub --quiet
-          python3 -c "
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id='Xenova/bge-small-en-v1.5', cache_dir='dist/model')
-print('Model cached in dist/model')
-"
+          python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Xenova/bge-small-en-v1.5', cache_dir='dist/model'); print('Model cached in dist/model')"
 
       - name: Generate npm packages
         run: node scripts/generate-npm-packages.mjs
