@@ -1,11 +1,11 @@
 {
   "name": "coree",
-  "version": "0.9.9-1",
+  "version": "0.10.0-1",
   "description": "Persistent memory and code intelligence for AI agents",
   "mcpServers": {
     "coree": {
       "command": "npx",
-      "args": ["--yes", "@coree-ai/coree@0.9.9", "serve"],
+      "args": ["--yes", "@coree-ai/coree@0.10.0", "serve"],
       "env": {
         "COREE_PLUGIN_DATA": "${extensionPath}/data"
       },
