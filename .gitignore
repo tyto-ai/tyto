@@ -1,6 +1,11 @@
 /target
 /dist/
-/npm/@coree-ai/coree-model-bge-small-en-v1.5/model/models--*
+/tmp/
+/agents/claude-local/plugin/
+/npm/@coree-ai/coree-linux-x64/coree
+/npm/@coree-ai/coree-linux-arm64/coree
+/npm/@coree-ai/coree-darwin-arm64/coree
+/npm/@coree-ai/coree-win32-x64/coree.exe
 
 # Claude Code local-only state
 .claude/
