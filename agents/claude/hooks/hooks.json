@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx --yes @coree-ai/coree@0.11.0 inject --type session"
+            "command": "npx --yes @coree-ai/coree@0.12.0 inject --type session"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx --yes @coree-ai/coree@0.11.0 inject --type prompt --budget 8000"
+            "command": "npx --yes @coree-ai/coree@0.12.0 inject --type prompt --budget 8000"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx --yes @coree-ai/coree@0.11.0 inject --type stop"
+            "command": "npx --yes @coree-ai/coree@0.12.0 inject --type stop"
           }
         ]
       }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx --yes @coree-ai/coree@0.11.0 inject --type compact"
+            "command": "npx --yes @coree-ai/coree@0.12.0 inject --type compact"
           }
         ]
       }
