@@ -30,7 +30,6 @@ impl Db {
                 ensure_parent_dir(&path)?;
                 let db =
                     turso::Builder::new_local(path.to_str().context("DB path is not valid UTF-8")?)
-                        .experimental_multiprocess_wal(true)
                         .experimental_index_method(true)
                         .build()
                         .await
@@ -87,7 +86,7 @@ impl Db {
         // Apply busy_timeout to all modes. Replica mode also needs it: the libsql background
         // sync thread can briefly lock the WAL, and without a retry budget store_memories
         // fails with "database is locked" on the first contention window.
-        conn.execute_batch("PRAGMA busy_timeout=5000;")
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
             .await
             .context("Failed to set busy_timeout")?;
 
