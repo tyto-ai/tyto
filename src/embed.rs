@@ -27,7 +27,9 @@ impl Embedder {
                 .join("coree")
                 .join("models");
             if !dir.exists() {
-                eprintln!("[coree] Downloading embedding model on first run. This may take a moment...");
+                eprintln!(
+                    "[coree] Downloading embedding model on first run. This may take a moment..."
+                );
             }
             dir
         };
@@ -77,7 +79,8 @@ pub fn floats_to_blob(v: &[f32]) -> Vec<u8> {
 /// Decode a little-endian byte blob back to a float slice. Inverse of floats_to_blob.
 pub fn blob_to_floats(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .filter_map(|c| c.try_into().ok())
+        .map(f32::from_le_bytes)
         .collect()
 }
 

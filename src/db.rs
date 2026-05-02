@@ -129,10 +129,10 @@ async fn open_replica_with_recovery(
                 }
             }
         }
-        Err(anyhow::anyhow!(
-            "Failed to build replica after 20 attempts: {}",
-            last_err.unwrap()
-        ))
+        Err(match last_err {
+            Some(e) => anyhow::anyhow!("Failed to build replica after 20 attempts: {e}"),
+            None => anyhow::anyhow!("Failed to build replica after 20 attempts: unknown error"),
+        })
     };
 
     let try_sync = |db: turso::sync::Database| async move {
@@ -154,10 +154,10 @@ async fn open_replica_with_recovery(
                 }
             }
         }
-        Err(anyhow::anyhow!(
-            "Failed to sync replica after 5 attempts: {}",
-            last_err.unwrap()
-        ))
+        Err(match last_err {
+            Some(e) => anyhow::anyhow!("Failed to sync replica after 5 attempts: {e}"),
+            None => anyhow::anyhow!("Failed to sync replica after 5 attempts: unknown error"),
+        })
     };
 
     let try_open = || async {

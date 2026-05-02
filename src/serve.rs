@@ -26,7 +26,7 @@ use turso::Connection;
 use uuid::Uuid;
 
 use crate::{
-    config::{Config, RemoteMode},
+    config::{Config, RemoteMode, StorageMode},
     db::{self, Db},
     embed::Embedder,
     index, migrations, project_id, remote, retrieve,
@@ -81,7 +81,9 @@ impl CoreeServer {
                     .to_string(),
             ),
             DbState::Ready(r) => Ok(Arc::clone(r)),
-            DbState::Failed(msg) => Err(format!("coree database initialisation failed: {msg}")),
+            DbState::Failed(msg) => Err(format!(
+                "coree database initialisation failed: {msg} — call the `diagnose` tool for remediation steps."
+            )),
         }
     }
 
@@ -330,6 +332,14 @@ impl CoreeServer {
     }
 }
 
+/// Log an unexpected tool operation failure to coree-serve.log and return it as the error string.
+/// Use for actual DB/embedder failures — not for try_ready() errors, which are already logged
+/// once at initialisation time and would be noisy if logged per tool call.
+fn tool_err(msg: String) -> String {
+    mlog!("tool error: {msg}");
+    msg
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -356,7 +366,10 @@ impl CoreeServer {
             let mut e = ready.embedder.lock().await;
             let mut out = Vec::with_capacity(embed_texts.len());
             for text in &embed_texts {
-                out.push(e.embed(text).map_err(|e| format!("embed failed: {e}"))?);
+                out.push(
+                    e.embed(text)
+                        .map_err(|e| tool_err(format!("embed failed: {e}")))?,
+                );
             }
             out
         };
@@ -383,7 +396,7 @@ impl CoreeServer {
                 } else {
                     format!("Stored {}", r.id)
                 }),
-                Err(e) => results.push(format!("Error: {e}")),
+                Err(e) => results.push(tool_err(format!("store failed: {e}"))),
             }
         }
         Ok(results.join("\n"))
@@ -405,7 +418,7 @@ impl CoreeServer {
         let embedding = {
             let mut e = ready.embedder.lock().await;
             e.embed(&input.query)
-                .map_err(|e| format!("embed failed: {e}"))?
+                .map_err(|e| tool_err(format!("embed failed: {e}")))?
         };
 
         retrieve::search(&ready.conn, embedding, &input.query, &project, limit)
@@ -419,7 +432,7 @@ impl CoreeServer {
                     crate::format::compact(&results, 0, None)
                 }
             })
-            .map_err(|e| format!("search_memory failed: {e}"))
+            .map_err(|e| tool_err(format!("search_memory failed: {e}")))
     }
 
     #[tool(
@@ -435,7 +448,7 @@ impl CoreeServer {
         }
         let memories = retrieve::get_full_batch(&ready.conn, &input.ids, &self.project_id)
             .await
-            .map_err(|e| format!("get_memories failed: {e}"))?;
+            .map_err(|e| tool_err(format!("get_memories failed: {e}")))?;
 
         // Index by ID so we can output in the requested order and detect missing ones.
         let by_id: std::collections::HashMap<&str, &retrieve::FullMemory> =
@@ -563,7 +576,7 @@ impl CoreeServer {
                 crate::format::compact(&results, 0, None)
             }
         })
-        .map_err(|e| format!("list_memories failed: {e}"))
+        .map_err(|e| tool_err(format!("list_memories failed: {e}")))
     }
 
     #[tool(
@@ -584,7 +597,7 @@ impl CoreeServer {
             )
             .await
             .map(|_| format!("Staged note: {}", input.summary))
-            .map_err(|e| format!("capture_note failed: {e}"))
+            .map_err(|e| tool_err(format!("capture_note failed: {e}")))
     }
 
     #[tool(
@@ -608,7 +621,7 @@ impl CoreeServer {
                 "{action} {n}/{total} memories ({} not found)",
                 total.saturating_sub(n as usize)
             )),
-            Err(e) => Err(format!("pin_memories failed: {e}")),
+            Err(e) => Err(tool_err(format!("pin_memories failed: {e}"))),
         }
     }
 
@@ -621,7 +634,7 @@ impl CoreeServer {
     ) -> Result<String, String> {
         remote::sync(&self.config, input.force.unwrap_or(false))
             .await
-            .map_err(|e| format!("remote_sync failed: {e}"))
+            .map_err(|e| tool_err(format!("remote_sync failed: {e}")))
     }
 
     #[tool(description = "Delete one or more memories by ID.")]
@@ -642,7 +655,7 @@ impl CoreeServer {
                 "Deleted {n}/{total} memories ({} not found)",
                 total.saturating_sub(n as usize)
             )),
-            Err(e) => Err(format!("delete_memories failed: {e}")),
+            Err(e) => Err(tool_err(format!("delete_memories failed: {e}"))),
         }
     }
 
@@ -663,7 +676,7 @@ impl CoreeServer {
                 }
                 Ok(out)
             }
-            Err(e) => Err(format!("list_stale_memories failed: {e}")),
+            Err(e) => Err(tool_err(format!("list_stale_memories failed: {e}"))),
         }
     }
 
@@ -677,7 +690,7 @@ impl CoreeServer {
         let ready = self.try_ready()?;
         crate::inject::build_tool_session_content(&ready.conn, &self.project_id)
             .await
-            .map_err(|e| format!("session_context failed: {e}"))
+            .map_err(|e| tool_err(format!("session_context failed: {e}")))
     }
 
     #[tool(
@@ -688,8 +701,112 @@ impl CoreeServer {
         match retrieve::evict_stale(&ready.conn, &self.project_id).await {
             Ok(0) => Ok("No stale memories to evict.".to_string()),
             Ok(n) => Ok(format!("Evicted {n} stale memories.")),
-            Err(e) => Err(format!("evict_stale_memories failed: {e}")),
+            Err(e) => Err(tool_err(format!("evict_stale_memories failed: {e}"))),
         }
+    }
+
+    #[tool(
+        description = "Return the current server state and any remediation steps. \
+        Always succeeds regardless of database state — call this when other tools return errors \
+        to get a diagnostic report the user can act on."
+    )]
+    async fn diagnose(&self) -> Result<String, String> {
+        let db_status = match &*self.db.borrow() {
+            DbState::Syncing => "syncing (initializing database and embedding model)".to_string(),
+            DbState::Ready(_) => "ready".to_string(),
+            DbState::Failed(msg) => format!("failed: {msg}"),
+        };
+        let idx_status = match &*self.idx.borrow() {
+            index::IndexState::Opening => "opening".to_string(),
+            index::IndexState::Ready(_) => "ready".to_string(),
+            index::IndexState::Disabled => "disabled".to_string(),
+            index::IndexState::Failed(msg) => format!("failed: {msg}"),
+        };
+
+        let log_dir = self.config.db_path().parent().map(|p| p.to_path_buf());
+
+        let mut out = format!("coree v{}\n", env!("CARGO_PKG_VERSION"));
+        out.push_str(&format!("memory: {db_status}\n"));
+        out.push_str(&format!("index: {idx_status}\n"));
+        out.push_str(&format!("project: {}\n", self.project_id));
+        if let Some(ref dir) = log_dir {
+            out.push_str(&format!("log dir: {}\n", dir.display()));
+        }
+
+        let in_codex = [
+            "CODEX_SANDBOX_NETWORK_DISABLED",
+            "CODEX_CI",
+            "CODEX_THREAD_ID",
+            "CODEX_MANAGED_BY_NPM",
+        ]
+        .iter()
+        .any(|v| std::env::var(v).is_ok());
+        if in_codex {
+            out.push_str("runtime: codex\n");
+        }
+
+        // Always include crash.log if present. This also covers the case where the background
+        // init task panicked: the panic hook writes crash.log but the DB state stays Syncing,
+        // so crash.log is the only way to surface what went wrong.
+        if let Some(crash_path) = log_dir.as_ref().map(|d| d.join("crash.log"))
+            && let Ok(crash) = std::fs::read_to_string(&crash_path)
+        {
+            let crash = crash.trim();
+            if !crash.is_empty() {
+                out.push_str(&format!("\n-- crash.log --\n{crash}\n"));
+            }
+        }
+
+        if db_status.starts_with("failed") {
+            out.push_str("\n-- remediation --\n");
+
+            // Missing auth token (most common Codex failure)
+            if matches!(self.config.memory.storage.mode, StorageMode::Remote)
+                && self.config.memory.storage.remote_auth_token.is_none()
+            {
+                out.push_str("Missing env var: COREE__MEMORY__REMOTE_AUTH_TOKEN is not set.\n");
+            }
+
+            // Read-only filesystem
+            if db_status.contains("os error 30")
+                || db_status.contains("Read-only")
+                || db_status.contains("read-only")
+            {
+                out.push_str("Filesystem is read-only. coree needs write access for its database and logs.\n");
+                if let Some(ref dir) = log_dir {
+                    out.push_str(&format!("Needs write access to: {}\n", dir.display()));
+                }
+            }
+
+            // Network / remote DB unreachable
+            if db_status.contains("EAI_AGAIN")
+                || db_status.contains("Connection refused")
+                || db_status.contains("Failed to build replica")
+                || db_status.contains("Failed to sync replica")
+            {
+                out.push_str("Network error: could not reach the remote database.\n");
+            }
+
+            if in_codex {
+                out.push_str("\nIn Codex, add to ~/.codex/config.toml:\n");
+                out.push_str("[mcp_servers.coree]\n");
+                out.push_str("env_vars = [\"COREE__MEMORY__REMOTE_AUTH_TOKEN\", \"COREE__MEMORY__REMOTE_URL\", \"COREE_BINARY_OVERRIDE\", \"COREE_MODEL_DIR\"]\n");
+                out.push_str("\nIf network or filesystem access is also needed:\n");
+                out.push_str("[sandbox_workspace_write]\n");
+                out.push_str("network_access = true\n");
+                out.push_str("writable_roots = [\"/home/you/.local/share/coree\", \"/home/you/.cache/coree\"]\n");
+            } else {
+                if let Some(ref dir) = log_dir {
+                    out.push_str(&format!(
+                        "Serve log: {}\n",
+                        dir.join("coree-serve.log").display()
+                    ));
+                }
+                out.push_str("Run `coree status` for a configuration summary.\n");
+            }
+        }
+
+        Ok(out)
     }
 
     // --- Code intelligence tools ---
@@ -713,12 +830,12 @@ impl CoreeServer {
                 "search_code embedder lock wait"
             );
             e.embed(&input.query)
-                .map_err(|e| format!("embed failed: {e}"))?
+                .map_err(|e| tool_err(format!("embed failed: {e}")))?
         };
 
         let results = index::search::search_code(&idx.conn, embedding, &input.query, limit)
             .await
-            .map_err(|e| format!("search_code failed: {e}"))?;
+            .map_err(|e| tool_err(format!("search_code failed: {e}")))?;
 
         if results.is_empty() {
             return Ok("No matching code found.".to_string());
@@ -747,7 +864,7 @@ impl CoreeServer {
         let idx = self.try_index_ready()?;
         let results = index::search::get_symbol(&idx.conn, &input.name, input.file_path.as_deref())
             .await
-            .map_err(|e| format!("get_symbol failed: {e}"))?;
+            .map_err(|e| tool_err(format!("get_symbol failed: {e}")))?;
 
         if results.is_empty() {
             return Ok(format!("Symbol '{}' not found in the index.", input.name));
@@ -868,7 +985,7 @@ impl CoreeServer {
                 "embedder lock wait"
             );
             e.embed(&input.query)
-                .map_err(|e| format!("embed failed: {e}"))?
+                .map_err(|e| tool_err(format!("embed failed: {e}")))?
         };
 
         // Memory search
@@ -995,7 +1112,7 @@ impl ServerHandler for CoreeServer {
                  Use search_code(query) only when you specifically want code/git results without memory noise. \
                  Use get_symbol(name) for exact symbol lookup — returns signature, git line-range history, hotspot score, and cross-type similar results. \
                  hotspot_score reflects recent modification frequency (higher = more volatile, treat with more scrutiny). \
-                 Memory tools: store_memories | search_memory | get_memories | list_memories | capture_note | pin_memories | delete_memories | remote_sync | session_context. \
+                 Memory tools: store_memories | search_memory | get_memories | list_memories | capture_note | pin_memories | delete_memories | remote_sync | session_context | diagnose. \
                  Code tools: search(query) | search_code(query) | get_symbol(name,[file_path])",
             )
     }
@@ -1026,7 +1143,7 @@ async fn reembed_stale(conn: Arc<Connection>, embedder: Arc<Mutex<Embedder>>) {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("coree: reembed scan failed: {e}");
+                    mlog!("coree: reembed scan failed: {e}");
                     return;
                 }
             };
@@ -1041,7 +1158,7 @@ async fn reembed_stale(conn: Arc<Connection>, embedder: Arc<Mutex<Embedder>>) {
 
         if batch.is_empty() {
             if total > 0 {
-                eprintln!("coree: re-embedded {total} memories to model {model}");
+                mlog!("coree: re-embedded {total} memories to model {model}");
             }
             return;
         }
@@ -1052,7 +1169,7 @@ async fn reembed_stale(conn: Arc<Connection>, embedder: Arc<Mutex<Embedder>>) {
                 match e.embed(&text) {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("coree: reembed failed for {id}: {e}");
+                        mlog!("coree: reembed failed for {id}: {e}");
                         continue;
                     }
                 }
@@ -1195,7 +1312,6 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     // Set up watch channels for memory DB and code index.
     let (db_tx, db_rx) = tokio::sync::watch::channel(DbState::Syncing);
     let (idx_tx, idx_rx) = tokio::sync::watch::channel(index::IndexState::Opening);
-    let mut db_rx_monitor = db_rx.clone();
 
     // Acquire an exclusive lock on serve.lock for this process's entire lifetime.
     // The OS releases it automatically on any exit (clean, crash, or SIGKILL), so
@@ -1345,6 +1461,20 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
             }
             Err(e) => {
                 mlog!("coree: database init failed: {e:#}");
+                // Write crash.log here: the server stays alive in degraded state rather than
+                // exiting, so run() will not write it for us.
+                let crash_log = config_for_bg
+                    .db_path()
+                    .parent()
+                    .map(|p| p.join("crash.log"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("crash.log"));
+                let ts = chrono::Utc::now().format("%H:%M:%S");
+                use std::io::Write as _;
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&crash_log)
+                    .and_then(|mut f| writeln!(f, "[{ts}] ERROR: {e:#}"));
                 let _ = db_tx_clone.send(DbState::Failed(format!("{e:#}")));
                 let _ = idx_tx_clone.send(index::IndexState::Disabled);
             }
@@ -1362,22 +1492,14 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     let service = server.serve(stdio()).await?;
     mlog!("coree: ready (waiting for database lock)");
 
-    // Wait for client disconnect, shutdown signal, or a permanent DB init failure.
-    // DB init failure is re-raised as an error so run() writes it to crash.log.
+    // Wait for client disconnect or shutdown signal.
+    // DB init failure transitions to DbState::Failed; tools return the error via try_ready()
+    // rather than disconnecting the client. crash.log is written by the background init task.
     let serve_result: Result<()> = tokio::select! {
         result = service.waiting() => result.map(|_| ()).map_err(Into::into),
         _ = shutdown_signal() => {
             mlog!("coree: shutting down");
             Ok(())
-        }
-        _ = wait_db_failed(&mut db_rx_monitor) => {
-            let msg = match &*db_rx_monitor.borrow() {
-                DbState::Failed(msg) => msg.clone(),
-                // Sender dropped without sending Failed — likely a panic in the init task.
-                // The panic hook will have written a more detailed message to crash.log.
-                _ => "background init task exited unexpectedly (possible panic — check crash.log)".to_string(),
-            };
-            Err(anyhow::anyhow!("Database init failed: {msg}"))
         }
     };
 
@@ -1467,31 +1589,6 @@ fn spawn_socket_listener(server: CoreeServer, config: &Config) {
     let _ = (server, config);
 }
 
-/// Resolves once the DB state transitions to [`DbState::Failed`].
-/// Resolves once the DB state transitions to [`DbState::Failed`], or if the
-/// background init task exits before reaching [`DbState::Ready`] (panic case).
-///
-/// Does NOT resolve when init succeeds: after a successful init the sender is
-/// dropped with state=Ready, and triggering the failure arm then would be wrong.
-async fn wait_db_failed(rx: &mut tokio::sync::watch::Receiver<DbState>) {
-    loop {
-        match &*rx.borrow() {
-            DbState::Failed(_) => return,
-            // Init succeeded — park forever so the select never picks this arm.
-            DbState::Ready(_) => std::future::pending::<()>().await,
-            DbState::Syncing => {}
-        }
-        if rx.changed().await.is_err() {
-            // Sender dropped. If state is Ready, init succeeded — park forever.
-            // If state is still Syncing, the task panicked before completing — trigger.
-            if matches!(&*rx.borrow(), DbState::Ready(_)) {
-                std::future::pending::<()>().await;
-            }
-            return;
-        }
-    }
-}
-
 async fn init_db_and_embedder(config: &Config, write_lock: WriteLock) -> Result<DbReady> {
     let t_init = std::time::Instant::now();
     mlog!("coree: opening database...");
@@ -1569,13 +1666,13 @@ async fn init_db_and_embedder(config: &Config, write_lock: WriteLock) -> Result<
                 // while the B-Tree is being modified locally.
                 let _guard = write_lock_clone.lock().await;
                 if let Err(e) = sync_db.push().await {
-                    tracing::error!(error = %e, "replica push failed");
+                    mlog!("coree: replica push failed: {e:#}");
                 }
                 if let Err(e) = sync_db.pull().await {
-                    tracing::error!(error = %e, "replica pull failed");
+                    mlog!("coree: replica pull failed: {e:#}");
                 }
                 if let Err(e) = sync_db.checkpoint().await {
-                    tracing::error!(error = %e, "replica checkpoint failed");
+                    mlog!("coree: replica checkpoint failed: {e:#}");
                 }
             }
         });
@@ -1600,10 +1697,15 @@ async fn shutdown_signal() {
     let ctrl_c = async { signal::ctrl_c().await.ok() };
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                mlog!("coree: failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await
+            }
+        }
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();

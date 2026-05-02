@@ -133,4 +133,10 @@ mod tests {
         let s = sanitize("TOKEN=short");
         assert_eq!(s, "TOKEN=short", "short values should not be redacted");
     }
+
+    #[test]
+    fn all_patterns_compile() {
+        // Forces LazyLock initialization — panics here rather than at runtime if any pattern is invalid.
+        assert!(!PATTERNS.is_empty());
+    }
 }
