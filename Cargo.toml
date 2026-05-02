@@ -7,13 +7,13 @@ description = "Persistent memory and code intelligence for AI agents, backed by 
 
 [dependencies]
 # MCP stdio transport
-rmcp = { version = "1.5.0", features = ["server", "client", "transport-io"] }
+rmcp = { version = "1.6.0", features = ["server", "client", "transport-io"] }
 
 # Database - pure Rust SQLite engine with Turso sync
-turso = { version = "0.6.0-pre.22", features = ["sync"] }
+turso = { version = "0.6.0-pre.26", features = ["sync"] }
 
 # Local ONNX embeddings (bge-small-en-v1.5)
-fastembed = { version = "5.13.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+fastembed = { version = "5.13.4", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 
 # Async runtime
 tokio = { version = "1.52.1", features = ["full"] }
@@ -64,7 +64,7 @@ hex = "0.4.3"
 
 # XDG/platform config and cache directories
 dirs = "6.0.0"
-fs4 = "1.0.2"
+fs4 = "1.1.0"
 
 # Code intelligence: AST parsing
 tree-sitter = "0.26.8"
@@ -95,7 +95,7 @@ tree-sitter-erlang = "0.16.0"
 tree-sitter-ql = "0.23.1"
 tree-sitter-elm = "5.9.0"
 tree-sitter-powershell = "0.26.3"
-tree-sitter-dart = "0.1.0"
+tree-sitter-dart = "0.2.0"
 tree-sitter-objc = "3.0.2"
 tree-sitter-tlaplus = "1.5.0"
 tree-sitter-css = "0.25.0"
