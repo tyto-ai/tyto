@@ -83,10 +83,14 @@ impl Db {
                 .context("Failed to connect to synced database")?,
         };
 
-        // Apply busy_timeout to all modes. Replica mode also needs it: the libsql background
-        // sync thread can briefly lock the WAL, and without a retry budget store_memories
-        // fails with "database is locked" on the first contention window.
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        // journal_mode=WAL returns a result row so must use query(), not execute_batch().
+        // execute_batch() cannot handle rows and returns "unexpected row during execution".
+        conn.query("PRAGMA journal_mode=WAL", ())
+            .await
+            .context("Failed to set WAL mode")?;
+        // busy_timeout: replica mode needs this too — the background sync thread can briefly
+        // lock the WAL, and without a retry budget store_memories fails with "database is locked".
+        conn.execute_batch("PRAGMA busy_timeout=5000;")
             .await
             .context("Failed to set busy_timeout")?;
 

@@ -1313,21 +1313,8 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     let (db_tx, db_rx) = tokio::sync::watch::channel(DbState::Syncing);
     let (idx_tx, idx_rx) = tokio::sync::watch::channel(index::IndexState::Opening);
 
-    // Acquire an exclusive lock on serve.lock for this process's entire lifetime.
-    // The OS releases it automatically on any exit (clean, crash, or SIGKILL), so
-    // inject can use a non-blocking lock attempt to detect whether we are running.
     let lock_file_path = config.serve_lock_path();
     let ready_file = config.serve_ready_path();
-    if let Some(parent) = lock_file_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let lock_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_file_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open serve.lock: {e}"))?;
 
     let session_id = Uuid::new_v4().to_string();
     mlog!("coree: session {session_id}, project \"{project_id}\"");
@@ -1357,7 +1344,29 @@ async fn serve_inner(config: Config, project_id: String) -> Result<()> {
     let is_primary = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let is_primary_bg = Arc::clone(&is_primary);
 
+    let lock_file_path_bg = lock_file_path.clone();
     tokio::spawn(async move {
+        // Open serve.lock inside the background task so a read-only FS degrades into
+        // DbState::Failed rather than crashing before MCP transport is established.
+        if let Some(parent) = lock_file_path_bg.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let lock_file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_file_path_bg)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                let msg = format!("Failed to open serve.lock: {e}");
+                mlog!("coree: {msg}");
+                let _ = db_tx_clone.send(DbState::Failed(msg));
+                let _ = idx_tx_clone.send(index::IndexState::Disabled);
+                return;
+            }
+        };
+
         loop {
             if lock_file.try_lock().is_ok() {
                 mlog!("coree: acquired serve.lock (primary)");

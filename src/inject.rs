@@ -67,15 +67,16 @@ fn serve_state(config: &Config) -> ServeState {
     }
 }
 
-/// Emitted to the agent when serve is still loading (first-run model download).
+/// Emitted to the agent when serve is still loading (DB open + model load, ~5-10s normally).
 /// UX requirement: always tell the user what is happening, why, and how long.
 const LOADING_MESSAGE: &str = "[coree] The memory server is still starting up.\n\
-     On first install, coree downloads a ~22MB embedding model — this takes up to a minute.\n\
+     coree is loading its embedding model from cache (~5-10 seconds normally; \
+     up to a minute on first install while the ~22MB model downloads).\n\
      Memory tools (search_memory, store_memories, etc.) will return a 'loading' message \
      until startup is complete.\n\n\
      Do the following right now, before responding to the user's request:\n\
-     1. Inform the user: \"coree is loading its embedding model (first-run setup, ~1 minute). \
-        Memory context is not available yet.\"\n\
+     1. Inform the user: \"coree is initializing (loading embedding model). \
+        Memory context will be available shortly.\"\n\
      2. Continue with the user's request as normal — do not block on coree.\n\
      3. Once coree has finished loading, call the session_context tool to load memory \
         context for this session. If session_context returns a 'loading' message, \
